@@ -10,6 +10,7 @@
     features: {
       applications: true,
       hiringCafe: true,
+      tabbedLayout: true,
     },
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

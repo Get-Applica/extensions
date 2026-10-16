@@ -206,12 +206,112 @@
     }
   }
 
+  /** Hosts that only serve job postings / applications (any page on them counts). */
+  const JOB_SITE_HOSTS = [
+    /(^|\.)lever\.co$/,
+    /(^|\.)greenhouse\.io$/,
+    /(^|\.)ashbyhq\.com$/,
+    /(^|\.)myworkdayjobs\.com$/,
+    /(^|\.)myworkdaysite\.com$/,
+    /(^|\.)smartrecruiters\.com$/,
+    /(^|\.)jobvite\.com$/,
+    /(^|\.)icims\.com$/,
+    /(^|\.)bamboohr\.com$/,
+    /(^|\.)workable\.com$/,
+    /(^|\.)recruitee\.com$/,
+    /(^|\.)breezy\.hr$/,
+    /(^|\.)teamtailor\.com$/,
+    /(^|\.)applytojob\.com$/,
+    /(^|\.)wellfound\.com$/
+  ];
+
+  /** Boards that also serve non-job pages: only specific job URLs count. */
+  function isJobBoardJobUrl(url) {
+    const host = url.hostname;
+    if (/(^|\.)linkedin\.com$/.test(host)) {
+      return url.pathname.startsWith('/jobs/view/') || url.searchParams.has('currentJobId');
+    }
+    if (/(^|\.)indeed\.com$/.test(host)) {
+      return url.pathname.startsWith('/viewjob') || url.searchParams.has('vjk') || url.searchParams.has('jk');
+    }
+    if (/(^|\.)glassdoor\.[a-z.]+$/.test(host)) {
+      return url.pathname.includes('/job-listing/') || url.searchParams.has('jl');
+    }
+    return false;
+  }
+
+  function findJobPostingNode(node) {
+    if (!node || typeof node !== 'object') return null;
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const found = findJobPostingNode(item);
+        if (found) return found;
+      }
+      return null;
+    }
+    const type = node['@type'];
+    if (type === 'JobPosting' || (Array.isArray(type) && type.includes('JobPosting'))) return node;
+    return findJobPostingNode(node['@graph']);
+  }
+
+  function textOrNull(value) {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed ? trimmed.slice(0, 200) : null;
+  }
+
+  /**
+   * Cheap check for "is this a job posting?" so the drawer can say so before analyzing.
+   * Structured data (schema.org JobPosting) first, then known job sites. Never throws.
+   */
+  function detectJobPosting() {
+    try {
+      const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+      for (const script of scripts) {
+        let parsed = null;
+        try {
+          parsed = JSON.parse(script.textContent || '');
+        } catch (_) {
+          continue;
+        }
+        const posting = findJobPostingNode(parsed);
+        if (posting) {
+          const org = posting.hiringOrganization;
+          return {
+            found: true,
+            source: 'structured-data',
+            title: textOrNull(posting.title),
+            company: textOrNull(typeof org === 'string' ? org : org?.name)
+          };
+        }
+      }
+      const url = new URL(window.location.href);
+      if (JOB_SITE_HOSTS.some((re) => re.test(url.hostname)) || isJobBoardJobUrl(url)) {
+        // No structured data: the tab title ("Senior Engineer - Acme | Lever") is the best label we have.
+        return { found: true, source: 'job-site', title: textOrNull(document.title), company: null };
+      }
+    } catch (_) {}
+    return { found: false, source: null, title: null, company: null };
+  }
+
   function notifyDrawerOpened() {
     postToDrawer({
       type: 'applica-drawer-opened',
       currentPageUrl: window.location.href,
-      pageOrigin: window.location.origin
+      pageOrigin: window.location.origin,
+      pageJob: detectJobPosting()
     });
+  }
+
+  /** Shortcut commands from the background worker wait here until the drawer document is ready. */
+  let drawerDocReady = false;
+  let pendingDrawerCommand = null;
+
+  function flushPendingDrawerCommand() {
+    if (!drawerDocReady || !pendingDrawerCommand) return;
+    const command = pendingDrawerCommand;
+    pendingDrawerCommand = null;
+    postToDrawer({ type: 'applica-run-command', command });
   }
 
   /** Keep drawer page context in sync on SPA job boards (LinkedIn, Workday, etc.). */
@@ -293,6 +393,20 @@
 
   window.addEventListener('applica-drawer-toggle', toggleDrawer);
 
+  window.addEventListener('applica-drawer-command', (event) => {
+    const command = event?.detail?.command;
+    if (typeof command !== 'string') return;
+    pendingDrawerCommand = command;
+    if (!isOpen) {
+      openDrawer();
+      if (drawerDocReady) {
+        lastNotifiedPageUrl = window.location.href;
+        notifyDrawerOpened();
+      }
+    }
+    flushPendingDrawerCommand();
+  });
+
   const MAX_ANALYZE_HTML_CHARS = 450000;
   const ANALYZE_HTML_SELECTORS = [
     '.jobs-description__container',
@@ -367,11 +481,13 @@
       return;
     }
     if (event.data?.type === 'applica-drawer-ready') {
+      drawerDocReady = true;
       if (isOpen) {
         lastNotifiedPageUrl = window.location.href;
         notifyDrawerOpened();
         // Do not fetch personas from content script: fetch runs in page context and is blocked by CORS
         // on strict sites (e.g. Workday). The drawer iframe (extension origin) will fetch on applica-drawer-opened.
+        flushPendingDrawerCommand();
       }
       return;
     }

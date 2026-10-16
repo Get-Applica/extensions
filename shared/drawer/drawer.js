@@ -11,6 +11,32 @@
   const { APPLICATION_STATUS_OPTIONS, STORAGE } = window.ApplicaConstants;
   const EXT = window.APPLICA_EXTENSION || { kind: 'seeker', features: {} };
   const isRecruiter = EXT.kind === 'recruiter';
+  /** Seeker Analyze/History tabs. When on, the worklist sections stay in the DOM but hidden. */
+  const tabbedLayout = !isRecruiter && EXT.features?.tabbedLayout === true;
+
+  // Tabbed layout state (declared up front so worklist code can call the tabbed hooks safely).
+  let tabbedTab = 'analyze';
+  let tabbedPersonasState = { loaded: false, error: null };
+  let tabbedOpeningsError = null;
+  /** { found, source, title, company } from content.js detectJobPosting(). */
+  let currentPageJob = null;
+  /** Most recent form fill on this page: { openingId, pending, result }. */
+  let tabbedFill = null;
+  let tabbedFillTimeoutId = null;
+  let tabbedApplyingOpeningId = null;
+  let tabbedCustomResumeBusy = false;
+  let tabbedSwitcherOpen = false;
+  let tabbedHistoryFilter = 'all';
+  let tabbedHistorySort = 'newest';
+  let tabbedHistoryQuery = '';
+  let tabbedHistoryDetailKey = null;
+  let tabbedConfirmKey = null;
+  let tabbedPendingCommand = null;
+  let tabbedRenderQueued = false;
+  let tabbedShortcutLabels = { analyze: '', fill: '' };
+  const tabbedPolledOpeningIds = new Set();
+  const tabbedLinks = { dashboard: null, profiles: null, upgrade: null };
+  const tabbedLastHtml = { analyze: null, history: null, detail: null };
 
   function setupEmailsEnabled() {
     return (
@@ -343,6 +369,10 @@
     loginSection.hidden = section !== 'login';
     scoreQueueSection.hidden = section !== 'signed-in';
     signedInSection.hidden = section !== 'signed-in';
+    if (tabbedLayout) {
+      const footer = document.getElementById('tb-footer');
+      if (footer) footer.hidden = section !== 'signed-in';
+    }
   }
 
   function isTrustedParentMessage(event) {
@@ -576,9 +606,15 @@
     if (payload.error) {
       const msg = escapeHtml(payload.error);
       listEl.innerHTML = '<div class="drawer-worklist-empty">' + msg + '</div>';
+      if (tabbedLayout) {
+        tabbedOpeningsError = payload.error;
+        applyDrawerLayout();
+        return;
+      }
       if (openingsSection) openingsSection.hidden = false;
       return;
     }
+    if (tabbedLayout) tabbedOpeningsError = null;
     const openings = payload.data?.openings || [];
     const hasMessage = payload.data?.message;
     const limits = payload.data?.limits;
@@ -625,6 +661,11 @@
       }
     } else {
       listEl.innerHTML = '<div class="drawer-worklist-empty">No openings yet.</div>';
+    }
+    if (tabbedLayout) {
+      maybePollCurrentPageOpening();
+      applyDrawerLayout();
+      return;
     }
     if (isApplicationDetailActive()) {
       applyDrawerLayout();
@@ -890,6 +931,12 @@
    * that might affect chrome visibility — do not toggle sections ad hoc elsewhere.
    */
   function applyDrawerLayout() {
+    if (tabbedLayout) {
+      applyTabbedLayout();
+      scheduleTabbedRender();
+      flushPendingTabbedCommand();
+      return;
+    }
     const mode = getDrawerLayoutMode();
     const isMain = mode === DrawerLayoutMode.MAIN;
     const isOpeningDetail = mode === DrawerLayoutMode.OPENING_DETAIL;
@@ -1376,11 +1423,15 @@
     const uploadInput = document.getElementById('opening-detail-resume-upload');
     setAnalyzeStatus('', 'Uploading resume…');
     if (uploadBtn) uploadBtn.disabled = true;
+    if (tabbedLayout) {
+      tabbedCustomResumeBusy = true;
+      scheduleTabbedRender();
+    }
     try {
       const updatedOpening = await uploadCustomResumeForOpening(selectedOpening, file);
       selectedOpening = { ...selectedOpening, ...updatedOpening };
       if (uploadInput) uploadInput.value = '';
-      showOpeningDetail(selectedOpening);
+      if (!tabbedLayout) showOpeningDetail(selectedOpening);
       const personaId = personaPicker?.value;
       if (personaId) {
         startOpeningsPoll(personaId, { openingId: selectedOpening.id });
@@ -1393,6 +1444,10 @@
       setAnalyzeStatus('error', err?.message || 'Upload failed.');
     } finally {
       if (uploadBtn) uploadBtn.disabled = false;
+      if (tabbedLayout) {
+        tabbedCustomResumeBusy = false;
+        scheduleTabbedRender();
+      }
     }
   }
 
@@ -1547,6 +1602,7 @@
   }
 
   function syncAnalyzeJobButtonState() {
+    scheduleTabbedRender();
     const analyzeBtn = document.getElementById('analyze-job-posting-btn');
     if (!analyzeBtn) return;
     const alreadyTracked = pageAlreadyTrackedAsOpening() || pageAlreadyTrackedAsApplication();
@@ -2135,6 +2191,7 @@
     }
     renderProfilePreferences(persona);
     syncProfilePickerLayout();
+    scheduleTabbedRender();
   }
 
   function saveSelectedPersonaId(personaId) {
@@ -2173,6 +2230,7 @@
     if (!picker) return;
     if (payload.error) {
       lastPersonas = [];
+      tabbedPersonasState = { loaded: true, error: payload.error };
       syncProfilePickerLayout();
       picker.innerHTML = `<option value="">${escapeHtml(payload.error)}</option>`;
       picker.disabled = true;
@@ -2181,6 +2239,7 @@
     }
     const personas = payload.data?.personas || [];
     lastPersonas = personas;
+    tabbedPersonasState = { loaded: true, error: null };
     syncProfilePickerLayout();
     picker.disabled = false;
     picker.innerHTML = personas.length
@@ -2331,7 +2390,12 @@
         rememberParentPageOrigin(event.origin);
       }
       if (!isHttpPageOrigin(parentPageOrigin)) return;
+      const previousPageUrl = currentPageUrl;
       currentPageUrl = event.data.currentPageUrl || null;
+      if (tabbedLayout) {
+        currentPageJob = event.data.pageJob || null;
+        if (previousPageUrl !== currentPageUrl) tabbedFill = null;
+      }
       if (lastOpeningsPayload) renderOpenings(lastOpeningsPayload);
       if (lastApplicationsPayload) renderApplications(lastApplicationsPayload);
       if (lastSetupEmailsPayload) renderSetupEmails(lastSetupEmailsPayload);
@@ -2339,6 +2403,14 @@
       const storedApps = await loadApplicationsViewState();
       if (storedApps) {
         applicationsViewMemory = storedApps;
+      }
+      if (tabbedLayout) {
+        // Opening detail lives on the Analyze tab now; only an application detail is restored.
+        if (previousPageUrl == null && isApplicationDetailActive()) setTabbedTab('history');
+        refreshShortcutLabels();
+        applyDrawerLayout();
+        syncAnalyzeJobButtonState();
+        return;
       }
       const storedOpenings = await loadDrawerViewState();
       if (storedOpenings) {
@@ -2365,9 +2437,36 @@
       if (!isHttpPageOrigin(event.origin)) return;
       showApiErrorBanner();
     }
+    if (event.data?.type === 'applica-run-command') {
+      if (tabbedLayout) runTabbedCommand(event.data.command);
+      return;
+    }
     if (event.data?.type === 'applica-fill-form-result') {
       if (!isHttpPageOrigin(event.origin)) return;
       const r = event.data;
+      if (tabbedLayout) {
+        if (tabbedFillTimeoutId) {
+          clearTimeout(tabbedFillTimeoutId);
+          tabbedFillTimeoutId = null;
+        }
+        if (r.error) {
+          tabbedFill = null;
+          showApiErrorBanner();
+          setAnalyzeStatus('error', r.error);
+        } else if (tabbedFill) {
+          tabbedFill = {
+            ...tabbedFill,
+            pending: false,
+            result: {
+              filled: Number(r.filled) || 0,
+              resumeAttached: Number(r.resumeAttached) || 0,
+              resumeError: r.resumeError || null
+            }
+          };
+        }
+        scheduleTabbedRender();
+        return;
+      }
       if (r.error) {
         showApiErrorBanner();
         setAnalyzeStatus('error', r.error);
@@ -2613,7 +2712,8 @@
   }
 
   async function submitOpeningFromPage(url, html, personaId) {
-    rememberAnalyzingOpening({ url, title: 'Analyzing job posting…', company: '' });
+    const startedAt = Date.now();
+    rememberAnalyzingOpening({ url, title: 'Analyzing job posting…', company: '', startedAt });
     renderOpenings(lastOpeningsPayload || { loggedIn: true, data: { openings: [], limits: {} } });
     try {
       const data = await window.ApplicaAPI.appFetchJson('/api/openings', {
@@ -2622,7 +2722,7 @@
         body: JSON.stringify({ url, persona_id: personaId, html })
       });
       if (data.opening) {
-        rememberAnalyzingOpening({ ...data.opening, url: data.opening.url || url });
+        rememberAnalyzingOpening({ ...data.opening, url: data.opening.url || url, startedAt });
       }
       fetchOpenings(personaId);
       const watchId = data.opening?.id ?? null;
@@ -2692,11 +2792,13 @@
     syncAnalyzeJobButtonState();
   }
 
-  async function handleDeleteQueueItem(openingId) {
+  async function handleDeleteQueueItem(openingId, options = {}) {
     const personaId = personaPicker?.value;
     if (!personaId) return;
-    const confirmed = window.confirm('Remove this job from your processing queue?');
-    if (!confirmed) return;
+    if (!options.skipConfirm) {
+      const confirmed = window.confirm('Remove this job from your processing queue?');
+      if (!confirmed) return;
+    }
     try {
       await window.ApplicaAPI.appFetchJson(`/api/openings/${openingId}`, { method: 'DELETE' });
       const removed = (lastOpeningsPayload?.data?.openings || []).find(
@@ -3169,26 +3271,34 @@
     openingDetailBack.addEventListener('click', () => showOpeningsList());
   }
 
+  /** Fetch form data for an opening and ask the host page to fill its form. Returns true if sent. */
+  async function requestFormFill(openingId) {
+    if (!openingId || window.parent === window) return false;
+    try {
+      const data = await window.ApplicaAPI.appFetchJson(
+        '/api/openings/' + encodeURIComponent(openingId) + '/form_details'
+      );
+      const formData = data.form_data;
+      if (!formData || typeof formData !== 'object') {
+        showApiErrorBanner();
+        setAnalyzeStatus('error', 'Invalid response: form_data missing.');
+        return false;
+      }
+      postToParent({ type: 'applica-fill-form-with-data', form_data: formData });
+      return true;
+    } catch (err) {
+      showApiErrorBanner();
+      setAnalyzeStatus('error', err?.message || 'Request failed.');
+      return false;
+    }
+  }
+
   const openingDetailFillForm = document.getElementById('opening-detail-fill-form');
   if (openingDetailFillForm) {
     openingDetailFillForm.addEventListener('click', async () => {
       if (!selectedOpening?.id || window.parent === window) return;
       setAnalyzeStatus('', 'Filling form…');
-      try {
-        const data = await window.ApplicaAPI.appFetchJson(
-          '/api/openings/' + encodeURIComponent(selectedOpening.id) + '/form_details'
-        );
-        const formData = data.form_data;
-        if (!formData || typeof formData !== 'object') {
-          showApiErrorBanner();
-          setAnalyzeStatus('error', 'Invalid response: form_data missing.');
-          return;
-        }
-        postToParent({ type: 'applica-fill-form-with-data', form_data: formData });
-      } catch (err) {
-        showApiErrorBanner();
-        setAnalyzeStatus('error', err?.message || 'Request failed.');
-      }
+      await requestFormFill(selectedOpening.id);
     });
   }
 
@@ -3200,6 +3310,19 @@
     });
   }
 
+  /** POST /api/applications for an opening. Throws on failure. */
+  async function createApplicationForOpening(openingId, networking = {}) {
+    const payload = { opening_id: String(openingId) };
+    if (networking.contact_name) payload.contact_name = networking.contact_name;
+    if (networking.contact_email) payload.contact_email = networking.contact_email;
+    if (networking.contact_url) payload.contact_url = networking.contact_url;
+    return window.ApplicaAPI.appFetchJson('/api/applications', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  }
+
   const openingDetailRemove = document.getElementById('opening-detail-remove');
   if (openingDetailRemove) {
     openingDetailRemove.addEventListener('click', async () => {
@@ -3207,15 +3330,7 @@
       setAnalyzeStatus('', 'Recording application…');
       try {
         const networking = readOpeningNetworkingFields();
-        const payload = { opening_id: String(selectedOpening.id) };
-        if (networking.contact_name) payload.contact_name = networking.contact_name;
-        if (networking.contact_email) payload.contact_email = networking.contact_email;
-        if (networking.contact_url) payload.contact_url = networking.contact_url;
-        const data = await window.ApplicaAPI.appFetchJson('/api/applications', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
+        const data = await createApplicationForOpening(selectedOpening.id, networking);
         resetOpeningNetworkingFields();
         const personaId = personaPicker?.value;
         selectedApplication = data.application || null;
@@ -3254,33 +3369,37 @@
     });
   }
 
+  /** Ask the host page for its HTML; handlePageDataForAnalyze submits it as a new opening. */
+  function requestAnalyzeCurrentPage() {
+    const personaId = personaPicker?.value;
+    if (!personaId) {
+      setAnalyzeStatus('error', 'Select a profile first.');
+      return;
+    }
+    if (analyzeBtn) analyzeBtn.disabled = true;
+    setAnalyzeStatus('', '');
+    if (window.parent !== window) {
+      const requestId = String(++analyzeRequestSeq);
+      const timeoutId = setTimeout(() => {
+        if (!pendingAnalyzeByRequestId.has(requestId)) return;
+        cancelPendingAnalyze(requestId);
+        setAnalyzeStatus(
+          'error',
+          'Could not read this page. Try reloading and opening the drawer again.'
+        );
+      }, ANALYZE_PAGE_DATA_TIMEOUT_MS);
+      pendingAnalyzeByRequestId.set(requestId, { personaId, timeoutId });
+      scheduleTabbedRender();
+      postToParent({ type: 'applica-analyze-current-page', requestId });
+    } else {
+      cancelPendingAnalyze();
+      setAnalyzeStatus('error', 'Open the drawer on a job page to analyze it.');
+    }
+  }
+
   const analyzeBtn = document.getElementById('analyze-job-posting-btn');
   if (analyzeBtn) {
-    analyzeBtn.addEventListener('click', () => {
-      const personaId = personaPicker?.value;
-      if (!personaId) {
-        setAnalyzeStatus('error', 'Select a profile first.');
-        return;
-      }
-      analyzeBtn.disabled = true;
-      setAnalyzeStatus('', '');
-      if (window.parent !== window) {
-        const requestId = String(++analyzeRequestSeq);
-        const timeoutId = setTimeout(() => {
-          if (!pendingAnalyzeByRequestId.has(requestId)) return;
-          cancelPendingAnalyze(requestId);
-          setAnalyzeStatus(
-            'error',
-            'Could not read this page. Try reloading and opening the drawer again.'
-          );
-        }, ANALYZE_PAGE_DATA_TIMEOUT_MS);
-        pendingAnalyzeByRequestId.set(requestId, { personaId, timeoutId });
-        postToParent({ type: 'applica-analyze-current-page', requestId });
-      } else {
-        cancelPendingAnalyze();
-        setAnalyzeStatus('error', 'Open the drawer on a job page to analyze it.');
-      }
-    });
+    analyzeBtn.addEventListener('click', requestAnalyzeCurrentPage);
   }
 
   function isContextInvalidated(e) {
@@ -3379,6 +3498,866 @@
     // Extension context invalidated
   }
 
+  /* ==========================================================================
+   * Seeker tabbed layout (features.tabbedLayout)
+   *
+   * Analyze tab: the profile, the job in this tab, and its match / fill / applied state.
+   * History tab: openings (not applied) and applications (applied) in one list.
+   * Reuses the worklist data, polling and API helpers above. Markup: tabbed-views.js.
+   * ======================================================================== */
+
+  const TabbedViews = window.ApplicaTabbedViews;
+  const tbEl = (id) => document.getElementById(id);
+  const TABBED_SLOW_SCORING_MS = 3 * 60 * 1000;
+  const TABBED_INCOMPLETE_NO_META_MS = 5 * 60 * 1000;
+  const TABBED_INCOMPLETE_MS = 30 * 60 * 1000;
+  const TABBED_FILL_TIMEOUT_MS = 15000;
+  const TABBED_MENUS = [
+    ['tb-settings-toggle', 'tb-settings-menu'],
+    ['tb-sort-toggle', 'tb-sort-menu'],
+    ['tb-more-toggle', 'tb-more-menu']
+  ];
+
+  function scheduleTabbedRender() {
+    if (!tabbedLayout || tabbedRenderQueued) return;
+    tabbedRenderQueued = true;
+    queueMicrotask(() => {
+      tabbedRenderQueued = false;
+      renderTabbed();
+    });
+  }
+
+  function applyTabbedLayout() {
+    [
+      'drawer-list-only-block',
+      'openings-section-content',
+      'applications-section-content',
+      'score-queue-section-content',
+      'setup-emails-section-content'
+    ].forEach((id) => setVisible(tbEl(id), false));
+    const isHistory = tabbedTab === 'history';
+    const appDetail = isApplicationDetailActive();
+    setVisible(tbEl('tb-panel-analyze'), !isHistory);
+    setVisible(tbEl('tb-panel-history'), isHistory);
+    setVisible(tbEl('tb-history-list-view'), !appDetail && !tabbedHistoryDetailKey);
+    setVisible(tbEl('tb-history-detail'), !appDetail && !!tabbedHistoryDetailKey);
+    setVisible(tbEl('application-detail-view'), appDetail);
+  }
+
+  function setTabbedTab(tab) {
+    tabbedTab = tab === 'history' ? 'history' : 'analyze';
+    tabbedSwitcherOpen = false;
+    closeTabbedMenus();
+    ['analyze', 'history'].forEach((name) => {
+      const btn = tbEl('tb-tab-' + name);
+      if (!btn) return;
+      const selected = name === tabbedTab;
+      btn.setAttribute('aria-selected', selected ? 'true' : 'false');
+      btn.tabIndex = selected ? 0 : -1;
+    });
+    applyDrawerLayout();
+  }
+
+  function currentPersona() {
+    const id = personaPicker?.value;
+    if (!id) return null;
+    return lastPersonas.find((p) => String(p.id) === String(id)) || null;
+  }
+
+  function personaTitle(persona) {
+    return (persona?.title || '').trim() || (persona?.name || '').trim() || 'Profile';
+  }
+
+  function personaResumeScore(persona) {
+    if (!persona || persona.match_score == null || persona.match_score === '') return null;
+    const n = Math.round(Number(persona.match_score));
+    return Number.isNaN(n) ? null : n;
+  }
+
+  function hostOf(url) {
+    if (!url) return '';
+    try {
+      return new URL(url).hostname.replace(/^www\./, '');
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function openingStartedAt(opening) {
+    if (!opening) return null;
+    if (opening.startedAt) return opening.startedAt;
+    const t = opening.inserted_at ? Date.parse(opening.inserted_at) : NaN;
+    return Number.isNaN(t) ? null : t;
+  }
+
+  /** 'scored' | 'scoring' | 'incomplete' for an opening (or in-flight placeholder). */
+  function tabbedOpeningState(opening) {
+    if (openingHasScore(opening)) return 'scored';
+    const since = openingStartedAt(opening);
+    const age = since ? Date.now() - since : 0;
+    if (age > TABBED_INCOMPLETE_MS) return 'incomplete';
+    if (!openingHasTitleAndCompany(opening) && age > TABBED_INCOMPLETE_NO_META_MS) return 'incomplete';
+    return 'scoring';
+  }
+
+  function openingScoreDetail(opening) {
+    if (!opening) return null;
+    let total = null;
+    if (opening.current_match_score != null && opening.current_match_score !== '') {
+      const n = Number(opening.current_match_score);
+      if (n > 0) total = n > 10 ? Math.round(n) : Math.round(n * 10);
+    }
+    if (total == null) total = getScoreFromAnalysis(opening.resume_analysis, 'match_score');
+    if (total == null) return null;
+    const analysis = opening.resume_analysis || {};
+    const persona = currentPersona();
+    return {
+      total,
+      label: scoreLabel(total),
+      skill: getScoreFromAnalysis(analysis, 'skill_match_score'),
+      exp: getScoreFromAnalysis(analysis, 'experience_match_score'),
+      edu: getScoreFromAnalysis(analysis, 'education_match_score'),
+      against: persona ? personaTitle(persona) : null
+    };
+  }
+
+  function openingWarnings(opening) {
+    const matching = (Array.isArray(opening?.matching_applications) ? opening.matching_applications : [])
+      .filter(Boolean)
+      .map((a) => ({
+        title: a.title,
+        statusLabel: a.status ? applicationStatusLabel(a.status) : '',
+        appliedAt: formatAppliedDate(a.applied_at)
+      }));
+    return {
+      avoid: !!opening?.company_avoid_warning,
+      interview: !!opening?.interview_in_progress_warning,
+      matching
+    };
+  }
+
+  function currentPageOpening() {
+    if (!currentPageUrl) return null;
+    const openings = lastOpeningsPayload?.data?.openings || [];
+    return (
+      openings.find((o) => o != null && openingMatchesCurrentPage(o)) ||
+      getAnalyzingOpeningByUrl(currentPageUrl) ||
+      null
+    );
+  }
+
+  function currentPageApplication(opening) {
+    const apps = lastApplicationsPayload?.data?.applications || [];
+    if (opening?.id != null) {
+      const byOpening = apps.find(
+        (a) => a?.opening_id != null && String(a.opening_id) === String(opening.id)
+      );
+      if (byOpening) return byOpening;
+    }
+    const byLink = apps.find((a) => a != null && applicationMatchesCurrentPage(a));
+    if (byLink) return byLink;
+    if (opening?.linked_application?.id != null) {
+      return {
+        ...opening.linked_application,
+        company: opening.company,
+        title: opening.title,
+        link: opening.url,
+        opening_id: opening.id
+      };
+    }
+    return null;
+  }
+
+  function findApplicationById(applicationId) {
+    const apps = lastApplicationsPayload?.data?.applications || [];
+    const listed = apps.find((a) => a != null && String(a.id) === String(applicationId));
+    if (listed) return listed;
+    const opening = currentPageOpening();
+    const fromOpening = currentPageApplication(opening);
+    return fromOpening && String(fromOpening.id) === String(applicationId) ? fromOpening : null;
+  }
+
+  function buildTabbedAnalyzeContext() {
+    const persona = currentPersona();
+    const profile = {
+      loading: !tabbedPersonasState.loaded,
+      error: tabbedPersonasState.error,
+      title: persona ? personaTitle(persona) : null,
+      cvFilename: persona?.cv_filename || null,
+      downloadPath: persona?.resume_download_path || null,
+      resumeScore: personaResumeScore(persona),
+      personas: lastPersonas.map((p) => ({
+        id: String(p.id),
+        title: personaTitle(p),
+        cvFilename: p.cv_filename || null,
+        score: personaResumeScore(p),
+        selected: persona != null && String(p.id) === String(persona.id)
+      })),
+      switcherOpen: tabbedSwitcherOpen && lastPersonas.length > 1,
+      manageHref: tabbedLinks.profiles
+    };
+
+    const page = {
+      inFrame: window.parent !== window && !!currentPageUrl,
+      host: hostOf(currentPageUrl),
+      detected: !!currentPageJob?.found,
+      title: currentPageJob?.title || null,
+      company: currentPageJob?.company || null
+    };
+
+    const opening = currentPageOpening();
+    const application = currentPageApplication(opening);
+    let job = { state: 'ready' };
+    if (opening || application) {
+      const state = application ? 'applied' : tabbedOpeningState(opening);
+      const openingId = opening?.id != null ? String(opening.id) : null;
+      const since = openingStartedAt(opening);
+      const appliedAt = application ? formatAppliedDate(application.applied_at) : '';
+      job = {
+        state,
+        title: opening?.title || application?.title || page.title,
+        company: opening?.company || application?.company || page.company,
+        url: opening?.url || application?.link || currentPageUrl,
+        openingId,
+        scoringSince: state === 'scoring' ? since : null,
+        slow: state === 'scoring' && since != null && Date.now() - since > TABBED_SLOW_SCORING_MS,
+        score: openingScoreDetail(opening),
+        cvFilename: opening?.cv_filename || persona?.cv_filename || null,
+        // Once applied, "you've applied here before" would just list this job.
+        warnings: opening
+          ? application
+            ? { avoid: !!opening.company_avoid_warning, interview: false, matching: [] }
+            : openingWarnings(opening)
+          : null,
+        canFill: !!openingId && !application,
+        fill: tabbedFill && openingId && tabbedFill.openingId === openingId ? tabbedFill : null,
+        applying: openingId != null && tabbedApplyingOpeningId === openingId,
+        application: application
+          ? {
+              id: String(application.id),
+              statusLabel: applicationStatusLabel(normalizeApplicationStatus(application.status)),
+              appliedAt
+            }
+          : null,
+        customResume:
+          opening && openingId && state === 'scored' && !application
+            ? {
+                canCustomize: lastOpeningsPayload?.data?.entitlements?.custom_resume_scoring === true,
+                upgradeHref: tabbedLinks.upgrade,
+                busy: tabbedCustomResumeBusy
+              }
+            : null
+      };
+    }
+
+    const limits = lastOpeningsPayload?.data?.limits;
+    const atLimit = limits != null && typeof limits.remaining === 'number' && limits.remaining === 0;
+    const unlimited = limits === 'unlimited' || limits?.unlimited === true;
+    const busy = pendingAnalyzeByRequestId.size > 0;
+    const analyze = {
+      busy,
+      disabled: busy || atLimit || !persona,
+      disabledReason: !persona
+        ? 'Create a profile first.'
+        : atLimit
+          ? 'You’ve used all your job analyses for now.'
+          : '',
+      usageHtml: limits && !unlimited ? usageBadgeHtml(limits) : '',
+      atLimit,
+      upgradeHref: tabbedLinks.upgrade
+    };
+
+    return { profile, page, job, analyze, keys: tabbedShortcutLabels };
+  }
+
+  function tabbedOpeningRow(opening, persona) {
+    const state = tabbedOpeningState(opening);
+    const score = state === 'scored' ? openingScoreDetail(opening) : null;
+    const since = openingStartedAt(opening);
+    return {
+      key: opening.id != null ? 'o:' + opening.id : 'p:' + normalizeUrlForCompare(opening.url),
+      kind: 'opening',
+      openingId: opening.id != null ? String(opening.id) : null,
+      url: opening.url || null,
+      host: hostOf(opening.url),
+      title: opening.title || hostOf(opening.url),
+      company: opening.company || '',
+      when: since ? formatRelativeTime(new Date(since).toISOString()) : '',
+      time: since || Date.now(),
+      state,
+      score: score?.total ?? null,
+      scoreLabel: score?.label ?? null,
+      scoreDetail: score,
+      warnings: openingWarnings(opening),
+      cvFilename: opening.cv_filename || persona?.cv_filename || null,
+      isCurrentPage: openingMatchesCurrentPage(opening)
+    };
+  }
+
+  /** Applications first-class; openings that already have an application are folded into them. */
+  function buildTabbedHistoryRows() {
+    const persona = currentPersona();
+    const openings = (lastOpeningsPayload?.data?.openings || []).filter(Boolean);
+    const apps = (lastApplicationsPayload?.data?.applications || []).filter(Boolean);
+    const openingById = new Map(openings.map((o) => [String(o.id), o]));
+    const appliedOpeningIds = new Set(
+      apps.filter((a) => a.opening_id != null).map((a) => String(a.opening_id))
+    );
+    const rows = [];
+    for (const app of apps) {
+      const opening = app.opening_id != null ? openingById.get(String(app.opening_id)) : null;
+      const score = openingScoreDetail(opening);
+      const status = normalizeApplicationStatus(app.status);
+      const dateIso = app.applied_at || app.inserted_at;
+      const time = dateIso ? Date.parse(dateIso) : NaN;
+      rows.push({
+        key: 'a:' + app.id,
+        kind: 'application',
+        applicationId: String(app.id),
+        url: app.link || null,
+        host: hostOf(app.link),
+        title: app.title || hostOf(app.link),
+        company: app.company || '',
+        when: formatRelativeTime(dateIso),
+        time: Number.isNaN(time) ? 0 : time,
+        state: 'scored',
+        status,
+        statusLabel: applicationStatusLabel(status),
+        score: score?.total ?? null,
+        scoreLabel: score?.label ?? null,
+        cvFilename: opening?.cv_filename || persona?.cv_filename || null,
+        isCurrentPage: applicationMatchesCurrentPage(app)
+      });
+    }
+    for (const opening of openings) {
+      if (opening.has_application || appliedOpeningIds.has(String(opening.id))) continue;
+      rows.push(tabbedOpeningRow(opening, persona));
+    }
+    for (const placeholder of analyzingOpeningEntries()) {
+      if (openingListedInProcessing(openings, placeholder)) continue;
+      if (placeholder.id != null && appliedOpeningIds.has(String(placeholder.id))) continue;
+      rows.push(tabbedOpeningRow(placeholder, persona));
+    }
+    return rows;
+  }
+
+  function filterTabbedHistoryRows(rows) {
+    let out = rows;
+    if (tabbedHistoryFilter === 'applied') out = out.filter((r) => r.kind === 'application');
+    else if (tabbedHistoryFilter === 'open') out = out.filter((r) => r.kind === 'opening');
+    const q = tabbedHistoryQuery.trim().toLowerCase();
+    if (q) {
+      out = out.filter((r) =>
+        [r.title, r.company, r.host, r.cvFilename, r.kind === 'application' ? r.statusLabel : 'not applied']
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
+          .includes(q)
+      );
+    }
+    const byTime = (a, b) => b.time - a.time;
+    const byScore = (a, b) => (b.score ?? -1) - (a.score ?? -1) || byTime(a, b);
+    return [...out].sort(tabbedHistorySort === 'score' ? byScore : byTime);
+  }
+
+  function setInnerHtmlIfChanged(el, cacheKey, html) {
+    if (!el || tabbedLastHtml[cacheKey] === html) return;
+    el.innerHTML = html;
+    tabbedLastHtml[cacheKey] = html;
+  }
+
+  function renderTabbed() {
+    if (!tabbedLayout || !TabbedViews) return;
+    setInnerHtmlIfChanged(
+      tbEl('tb-panel-analyze'),
+      'analyze',
+      TabbedViews.analyzePanelHtml(buildTabbedAnalyzeContext())
+    );
+
+    const rows = buildTabbedHistoryRows();
+    const counts = {
+      all: rows.length,
+      open: rows.filter((r) => r.kind === 'opening').length,
+      applied: rows.filter((r) => r.kind === 'application').length
+    };
+    const countEl = tbEl('tb-history-count');
+    if (countEl) countEl.textContent = rows.length ? String(rows.length) : '';
+    document.querySelectorAll('[data-tb-count]').forEach((el) => {
+      el.textContent = String(counts[el.getAttribute('data-tb-count')] ?? 0);
+    });
+    document.querySelectorAll('[data-tb-filter]').forEach((el) => {
+      el.setAttribute('aria-pressed', el.getAttribute('data-tb-filter') === tabbedHistoryFilter ? 'true' : 'false');
+    });
+    document.querySelectorAll('[data-tb-sort]').forEach((el) => {
+      el.setAttribute('aria-checked', el.getAttribute('data-tb-sort') === tabbedHistorySort ? 'true' : 'false');
+    });
+    const sortToggle = tbEl('tb-sort-toggle');
+    if (sortToggle) {
+      sortToggle.title = tabbedHistorySort === 'score' ? 'Sorted by best match' : 'Sorted by newest';
+    }
+
+    let listHtml = TabbedViews.historyListHtml(filterTabbedHistoryRows(rows), {
+      confirmKey: tabbedConfirmKey,
+      query: tabbedHistoryQuery.trim(),
+      filter: tabbedHistoryFilter
+    });
+    if (tabbedOpeningsError) {
+      listHtml = '<div class="tb-empty tb-empty--error">' + escapeHtml(tabbedOpeningsError) + '</div>' + listHtml;
+    }
+    setInnerHtmlIfChanged(tbEl('tb-history-list'), 'history', listHtml);
+
+    if (tabbedHistoryDetailKey) {
+      const row = rows.find((r) => r.key === tabbedHistoryDetailKey && r.kind === 'opening');
+      if (!row) {
+        tabbedHistoryDetailKey = null;
+        applyTabbedLayout();
+      } else {
+        setInnerHtmlIfChanged(
+          tbEl('tb-history-detail'),
+          'detail',
+          TabbedViews.historyOpeningDetailHtml(row, {
+            confirmKey: tabbedConfirmKey,
+            fillKey: tabbedShortcutLabels.fill,
+            applying: row.openingId != null && tabbedApplyingOpeningId === row.openingId
+          })
+        );
+      }
+    }
+    syncTabbedChrome();
+  }
+
+  /** Settings menu links, footer labels: everything outside the two panels. */
+  function syncTabbedChrome() {
+    const persona = currentPersona();
+    const hiringCafe = tbEl('tb-hiring-cafe');
+    if (hiringCafe) {
+      const url = persona?.hiring_cafe_url;
+      const show = typeof url === 'string' && /^https?:\/\//i.test(url) && EXT.features?.hiringCafe !== false;
+      hiringCafe.hidden = !show;
+      hiringCafe.href = show ? url : '#';
+    }
+    const profilesLink = tbEl('tb-manage-profiles');
+    if (profilesLink && tabbedLinks.profiles) profilesLink.href = tabbedLinks.profiles;
+    const dashboardLink = tbEl('tb-dashboard-link');
+    if (dashboardLink && tabbedLinks.dashboard) dashboardLink.href = tabbedLinks.dashboard;
+    const signedInAs = tbEl('tb-signed-in-as');
+    if (signedInAs) {
+      const who = signedInEmail?.textContent?.trim();
+      signedInAs.textContent = who ? 'Signed in as ' + who : '';
+      signedInAs.hidden = !who;
+    }
+    const shortcutsLink = tbEl('tb-shortcuts-link');
+    if (shortcutsLink) {
+      const anyBound = !!(tabbedShortcutLabels.analyze || tabbedShortcutLabels.fill);
+      shortcutsLink.textContent = anyBound ? 'Keyboard shortcuts' : 'Set up shortcuts';
+    }
+  }
+
+  function updateTabbedElapsed() {
+    const el = tbEl('tb-elapsed');
+    if (!el || !TabbedViews) return;
+    const since = Number(el.getAttribute('data-since'));
+    if (since) el.textContent = TabbedViews.formatElapsed(Date.now() - since);
+  }
+
+  /** After a drawer reload mid-score, keep polling the current page's opening until it scores. */
+  function maybePollCurrentPageOpening() {
+    const personaId = personaPicker?.value;
+    if (!personaId || !currentPageUrl) return;
+    const openings = lastOpeningsPayload?.data?.openings || [];
+    const opening = openings.find((o) => o != null && openingMatchesCurrentPage(o));
+    if (!opening || opening.id == null || openingHasScore(opening) || opening.has_application) return;
+    const id = String(opening.id);
+    if (pollingWatchOpeningIds.has(id) || tabbedPolledOpeningIds.has(id)) return;
+    if (tabbedOpeningState(opening) === 'incomplete') return;
+    tabbedPolledOpeningIds.add(id);
+    ensureOpeningsPoll(personaId, { openingId: id, delayMs: 0 });
+  }
+
+  async function loadTabbedLinks() {
+    if (typeof window.ApplicaAPI?.appUrl !== 'function') return;
+    try {
+      tabbedLinks.dashboard = await window.ApplicaAPI.appUrl('/dashboard');
+      tabbedLinks.profiles = await window.ApplicaAPI.appUrl('/dashboard/profiles');
+      tabbedLinks.upgrade = await window.ApplicaAPI.appUrl('/dashboard/settings#billing');
+    } catch (_) {}
+    scheduleTabbedRender();
+  }
+
+  /** Read the user's actual bindings; Chrome drops our suggested keys if they clash. */
+  function refreshShortcutLabels() {
+    try {
+      if (typeof chrome === 'undefined' || !chrome?.commands?.getAll) return;
+      chrome.commands.getAll((commands) => {
+        if (chrome.runtime?.lastError) return;
+        const byName = {};
+        for (const c of commands || []) byName[c.name] = c.shortcut || '';
+        tabbedShortcutLabels = {
+          analyze: byName['analyze-job'] || '',
+          fill: byName['fill-form'] || ''
+        };
+        scheduleTabbedRender();
+      });
+    } catch (_) {
+      // Extension context invalidated
+    }
+  }
+
+  function openShortcutSettings() {
+    try {
+      chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
+    } catch (_) {
+      setAnalyzeStatus('error', 'Open chrome://extensions/shortcuts to set Applica shortcuts.');
+    }
+  }
+
+  function runTabbedCommand(command) {
+    if (command !== 'analyze-job' && command !== 'fill-form') return;
+    if (isApplicationDetailActive()) showApplicationsList();
+    tabbedHistoryDetailKey = null;
+    setTabbedTab('analyze');
+    tabbedPendingCommand = command;
+    flushPendingTabbedCommand();
+  }
+
+  /** Shortcut commands wait until the profile and openings have loaded. */
+  function flushPendingTabbedCommand() {
+    if (!tabbedLayout || !tabbedPendingCommand) return;
+    if (!personaPicker?.value || !lastOpeningsPayload || !currentPageUrl) return;
+    const command = tabbedPendingCommand;
+    tabbedPendingCommand = null;
+    const opening = currentPageOpening();
+    const application = currentPageApplication(opening);
+    if (command === 'analyze-job') {
+      // Already analyzed or applied: the Analyze tab is showing it.
+      if (opening || application || pendingAnalyzeByRequestId.size > 0) return;
+      requestAnalyzeCurrentPage();
+      return;
+    }
+    if (application) {
+      setAnalyzeStatus('', 'You’ve already marked this job as applied.');
+      setTimeout(() => setAnalyzeStatus('', ''), 3000);
+      return;
+    }
+    if (opening?.id != null) {
+      startTabbedFill(String(opening.id));
+      return;
+    }
+    setAnalyzeStatus(
+      '',
+      'Analyze this job first, then fill the form.' +
+        (tabbedShortcutLabels.analyze ? ' Press ' + tabbedShortcutLabels.analyze + ' to analyze.' : '')
+    );
+    setTimeout(() => setAnalyzeStatus('', ''), 4000);
+  }
+
+  async function startTabbedFill(openingId) {
+    if (tabbedFill?.pending) return;
+    tabbedFill = { openingId, pending: true, result: null };
+    scheduleTabbedRender();
+    if (tabbedFillTimeoutId) clearTimeout(tabbedFillTimeoutId);
+    tabbedFillTimeoutId = setTimeout(() => {
+      tabbedFillTimeoutId = null;
+      if (!tabbedFill?.pending) return;
+      tabbedFill = null;
+      setAnalyzeStatus('error', 'The page didn’t respond. Reload it and try again.');
+      scheduleTabbedRender();
+    }, TABBED_FILL_TIMEOUT_MS);
+    const sent = await requestFormFill(openingId);
+    if (!sent) {
+      tabbedFill = null;
+      scheduleTabbedRender();
+    }
+  }
+
+  async function markOpeningApplied(openingId, options = {}) {
+    if (!openingId || tabbedApplyingOpeningId) return;
+    tabbedApplyingOpeningId = String(openingId);
+    scheduleTabbedRender();
+    try {
+      const data = await createApplicationForOpening(openingId);
+      if (data.application) upsertApplicationInList(data.application);
+      const personaId = personaPicker?.value;
+      if (personaId) {
+        await fetchApplications(personaId, { silent: true });
+        await fetchOpenings(personaId, { silent: true });
+      }
+      if (options.openDetail && data.application) {
+        tabbedHistoryDetailKey = null;
+        showApplicationDetail(findApplicationById(data.application.id) || data.application);
+      } else {
+        setAnalyzeStatus('', 'Marked as applied. It’s in History under Applied.');
+        setTimeout(() => setAnalyzeStatus('', ''), 3000);
+      }
+    } catch (err) {
+      showApiErrorBanner();
+      setAnalyzeStatus('error', err?.message || 'Could not mark as applied.');
+    } finally {
+      tabbedApplyingOpeningId = null;
+      scheduleTabbedRender();
+    }
+  }
+
+  async function removeTabbedRow(key) {
+    tabbedConfirmKey = null;
+    const row = buildTabbedHistoryRows().find((r) => r.key === key);
+    if (!row || row.kind !== 'opening') {
+      scheduleTabbedRender();
+      return;
+    }
+    if (tabbedHistoryDetailKey === key) tabbedHistoryDetailKey = null;
+    if (row.openingId) {
+      await handleDeleteQueueItem(row.openingId, { skipConfirm: true });
+    } else if (row.url) {
+      handleCancelInProgressQueueItem(row.url);
+    }
+    applyDrawerLayout();
+  }
+
+  function closeTabbedMenus() {
+    for (const [toggleId, menuId] of TABBED_MENUS) {
+      const menu = tbEl(menuId);
+      const toggle = tbEl(toggleId);
+      if (menu) menu.hidden = true;
+      if (toggle) toggle.setAttribute('aria-expanded', 'false');
+    }
+  }
+
+  function toggleTabbedMenu(toggleId, menuId) {
+    const menu = tbEl(menuId);
+    const toggle = tbEl(toggleId);
+    if (!menu || !toggle) return;
+    const opening = menu.hidden;
+    closeTabbedMenus();
+    if (tabbedSwitcherOpen) {
+      tabbedSwitcherOpen = false;
+      scheduleTabbedRender();
+    }
+    menu.hidden = !opening;
+    toggle.setAttribute('aria-expanded', opening ? 'true' : 'false');
+    if (opening) menu.querySelector('.tb-pop-item')?.focus();
+  }
+
+  function handleTabbedAction(action, el) {
+    switch (action) {
+      case 'switcher':
+        closeTabbedMenus();
+        tabbedSwitcherOpen = !tabbedSwitcherOpen;
+        scheduleTabbedRender();
+        if (tabbedSwitcherOpen) {
+          queueMicrotask(() => document.querySelector('.tb-persona-item[aria-checked="true"]')?.focus());
+        }
+        return;
+      case 'pick-persona': {
+        const id = el.getAttribute('data-persona-id');
+        tabbedSwitcherOpen = false;
+        if (personaPicker && id && personaPicker.value !== id) {
+          tabbedFill = null;
+          tabbedHistoryDetailKey = null;
+          tabbedConfirmKey = null;
+          tabbedPolledOpeningIds.clear();
+          if (isApplicationDetailActive()) showApplicationsList();
+          personaPicker.value = id;
+          personaPicker.dispatchEvent(new Event('change'));
+        }
+        scheduleTabbedRender();
+        return;
+      }
+      case 'download-resume': {
+        const persona = currentPersona();
+        if (!persona?.resume_download_path) return;
+        downloadPersonaResume({
+          dataset: { resumeDownloadPath: persona.resume_download_path, filename: persona.cv_filename || '' },
+          textContent: persona.cv_filename || ''
+        }).catch((err) => setDrawerFeedback('error', err?.message || 'Could not download resume.'));
+        return;
+      }
+      case 'analyze':
+        requestAnalyzeCurrentPage();
+        return;
+      case 'fill': {
+        const opening = currentPageOpening();
+        if (opening?.id != null) startTabbedFill(String(opening.id));
+        return;
+      }
+      case 'mark-applied':
+        markOpeningApplied(el.getAttribute('data-opening-id'), { openDetail: tabbedTab === 'history' });
+        return;
+      case 'upload-resume': {
+        const opening = currentPageOpening();
+        const input = tbEl('opening-detail-resume-upload');
+        if (!opening?.id || !input) return;
+        selectedOpening = opening;
+        input.click();
+        return;
+      }
+      case 'view-application': {
+        const app = findApplicationById(el.getAttribute('data-application-id'));
+        if (!app) return;
+        tabbedHistoryDetailKey = null;
+        setTabbedTab('history');
+        showApplicationDetail(app);
+        return;
+      }
+      case 'remove-current': {
+        const openingId = el.getAttribute('data-opening-id');
+        const url = el.getAttribute('data-url');
+        if (openingId) handleDeleteQueueItem(openingId);
+        else if (url) handleCancelInProgressQueueItem(url);
+        return;
+      }
+      case 'open-row': {
+        const key = el.getAttribute('data-row-key');
+        const row = buildTabbedHistoryRows().find((r) => r.key === key);
+        if (!row) return;
+        tabbedConfirmKey = null;
+        if (row.kind === 'application') {
+          const app = findApplicationById(row.applicationId);
+          if (app) showApplicationDetail(app);
+        } else {
+          tabbedHistoryDetailKey = key;
+          tabbedLastHtml.detail = null;
+          applyDrawerLayout();
+        }
+        window.scrollTo(0, 0);
+        return;
+      }
+      case 'ask-remove':
+        tabbedConfirmKey = el.getAttribute('data-row-key');
+        scheduleTabbedRender();
+        return;
+      case 'cancel-remove':
+        tabbedConfirmKey = null;
+        scheduleTabbedRender();
+        return;
+      case 'confirm-remove':
+        removeTabbedRow(el.getAttribute('data-row-key'));
+        return;
+      case 'detail-back':
+        tabbedHistoryDetailKey = null;
+        tabbedConfirmKey = null;
+        applyDrawerLayout();
+        return;
+      case 'open-posting': {
+        const url = el.getAttribute('data-url');
+        if (url) openUrlInNewTab(url);
+        return;
+      }
+      case 'shortcuts':
+        closeTabbedMenus();
+        openShortcutSettings();
+        return;
+      default:
+    }
+  }
+
+  function handleTabbedClick(e) {
+    const target = e.target;
+    if (!(target instanceof Element)) return;
+    const menuToggle = target.closest('#tb-settings-toggle, #tb-sort-toggle, #tb-more-toggle');
+    if (menuToggle) {
+      const pair = TABBED_MENUS.find(([toggleId]) => toggleId === menuToggle.id);
+      if (pair) toggleTabbedMenu(pair[0], pair[1]);
+      return;
+    }
+    const tabBtn = target.closest('[data-tb-tab]');
+    if (tabBtn) {
+      setTabbedTab(tabBtn.getAttribute('data-tb-tab'));
+      return;
+    }
+    const filterBtn = target.closest('[data-tb-filter]');
+    if (filterBtn) {
+      tabbedHistoryFilter = filterBtn.getAttribute('data-tb-filter') || 'all';
+      tabbedConfirmKey = null;
+      scheduleTabbedRender();
+      return;
+    }
+    const sortBtn = target.closest('[data-tb-sort]');
+    if (sortBtn) {
+      tabbedHistorySort = sortBtn.getAttribute('data-tb-sort') === 'score' ? 'score' : 'newest';
+      closeTabbedMenus();
+      scheduleTabbedRender();
+      return;
+    }
+    const bulkBtn = target.closest('[data-tb-bulk]');
+    if (bulkBtn) {
+      closeTabbedMenus();
+      handleBulkDeleteBelowScore(bulkBtn.getAttribute('data-tb-bulk'));
+      return;
+    }
+    if (target.closest('#tb-sign-out')) {
+      closeTabbedMenus();
+      signOutBtn.click();
+      return;
+    }
+    if (target.closest('.tb-pop a')) {
+      closeTabbedMenus();
+      return;
+    }
+    const actionEl = target.closest('[data-tb-action]');
+    if (!actionEl) {
+      if (!target.closest('.tb-pop')) {
+        closeTabbedMenus();
+        if (tabbedSwitcherOpen) {
+          tabbedSwitcherOpen = false;
+          scheduleTabbedRender();
+        }
+      }
+      return;
+    }
+    if (actionEl.disabled) return;
+    handleTabbedAction(actionEl.getAttribute('data-tb-action'), actionEl);
+  }
+
+  function handleTabbedTabKeydown(e) {
+    const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End'];
+    if (!keys.includes(e.key)) return;
+    e.preventDefault();
+    const next =
+      e.key === 'Home' ? 'analyze' : e.key === 'End' ? 'history' : tabbedTab === 'analyze' ? 'history' : 'analyze';
+    setTabbedTab(next);
+    tbEl('tb-tab-' + next)?.focus();
+  }
+
+  function initTabbedLayout() {
+    if (!tabbedLayout) return;
+    if (!TabbedViews) {
+      console.error('Applica: tabbed-views.js did not load');
+      return;
+    }
+    document.body.classList.add('drawer-tabbed');
+    const shell = tbEl('tb-shell');
+    if (shell) shell.hidden = false;
+    const statusSlot = tbEl('tb-status-slot');
+    const statusEl = tbEl('analyze-status');
+    if (statusSlot && statusEl) statusSlot.appendChild(statusEl);
+    const historyPanel = tbEl('tb-panel-history');
+    const appDetail = tbEl('application-detail-view');
+    if (historyPanel && appDetail) historyPanel.appendChild(appDetail);
+
+    document.addEventListener('click', handleTabbedClick);
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      closeTabbedMenus();
+      if (tabbedSwitcherOpen) {
+        tabbedSwitcherOpen = false;
+        scheduleTabbedRender();
+      }
+    });
+    tbEl('tb-shell')?.querySelector('.tb-tabs')?.addEventListener('keydown', handleTabbedTabKeydown);
+    tbEl('tb-history-query')?.addEventListener('input', (e) => {
+      tabbedHistoryQuery = e.target.value || '';
+      tabbedConfirmKey = null;
+      scheduleTabbedRender();
+    });
+    setInterval(updateTabbedElapsed, 1000);
+
+    loadTabbedLinks();
+    refreshShortcutLabels();
+    setTabbedTab('analyze');
+  }
+
+  initTabbedLayout();
   refreshAuthState();
 
   // Tell parent we're ready so it can send drawer-opened and/or push personas (avoids race after extension reload)

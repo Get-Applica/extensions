@@ -20,6 +20,22 @@
   "background": {
     "service_worker": "background.js"
   },
+  "commands": {
+    "analyze-job": {
+      "suggested_key": {
+        "default": "Alt+J",
+        "mac": "Alt+J"
+      },
+      "description": "Open Applica and analyze the job on this page"
+    },
+    "fill-form": {
+      "suggested_key": {
+        "default": "Alt+A",
+        "mac": "Alt+A"
+      },
+      "description": "Fill the application form on this page"
+    }
+  },
   "content_scripts": [
     {
       "matches": [
@@ -48,6 +64,8 @@
         "drawer/drawer.html",
         "drawer/drawer.css",
         "drawer/drawer.js",
+        "drawer/tabbed.css",
+        "drawer/tabbed-views.js",
         "images/applica_logo.png",
         "auth.html"
       ],

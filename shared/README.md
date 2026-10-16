@@ -17,9 +17,12 @@ Do not load this folder directly in Chrome; use `../dist/seeker` or `../dist/rec
 | Here (`shared/`) | In overlay (`seeker/` or `recruiter/`) |
 |------------------|----------------------------------------|
 | `drawer/drawer.js`, `drawer.css`, `drawer.html` | `manifest.json` |
+| `drawer/tabbed-views.js`, `tabbed.css` (seeker tabs) | |
 | `content/content.js`, `content.css` | `lib/api.js`, `lib/extension-config.js` |
 | `lib/config.js`, `constants.js`, `util.js` | `recruiter/images/` (orange icons) |
 | `background.js` | `seeker/auth.html` (OAuth callback only) |
 | `images/` (seeker mint icons) | |
 
 `drawer.js` reads `window.APPLICA_EXTENSION` for recruiter vs seeker login and picker behavior.
+
+`features.tabbedLayout` (on in the seeker overlay) switches the drawer to Analyze / History tabs. The recruiter build keeps the worklist layout. The seeker manifest's `commands` (Alt+J analyze, Alt+A fill) are handled in `background.js` and forwarded to the drawer by `content.js`.

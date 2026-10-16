@@ -1,7 +1,7 @@
 {
   "name": "Applica Extension",
   "description": "Applica Extension - right-hand drawer for app integration",
-  "version": "3.0.1",
+  "version": "4.0.0",
   "manifest_version": 3,
   "permissions": [
     "activeTab",

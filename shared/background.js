@@ -65,6 +65,29 @@ chrome.action.onClicked.addListener((tab) => {
   });
 });
 
+/** Keyboard shortcuts (seeker manifest `commands`). Invoking one grants activeTab on the page. */
+const DRAWER_COMMANDS = new Set(['analyze-job', 'fill-form']);
+
+async function runDrawerCommandOnTab(tabId, command) {
+  await injectDrawerContentScript(tabId);
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (cmd) => {
+      window.dispatchEvent(new CustomEvent('applica-drawer-command', { detail: { command: cmd } }));
+    },
+    args: [command]
+  });
+}
+
+if (chrome.commands?.onCommand) {
+  chrome.commands.onCommand.addListener((command, tab) => {
+    if (!DRAWER_COMMANDS.has(command) || !tab?.id) return;
+    runDrawerCommandOnTab(tab.id, command).catch((e) => {
+      console.debug('Applica: could not run shortcut', command, e);
+    });
+  });
+}
+
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete' || !tab?.url?.startsWith('http')) return;
   chrome.storage.local.get([REOPEN_DRAWER_TS_KEY], (data) => {
