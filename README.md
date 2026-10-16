@@ -1,55 +1,55 @@
-# Chrome extensions (seeker + recruiter)
+# Applica Chrome extensions
 
-Two installable extensions share one codebase:
+Chrome extensions for [Applica](https://app.getapplica.com), a job-search tool. A drawer opens beside any job posting to score it against your resume, fill the application form from your profile, and track what you've applied to.
 
-- **Seeker** — public Chrome Web Store listing; job seekers sign in with Applica OAuth.
-- **Recruiter** — private/unlisted listing; recruiters sign in with recruiter ID + key and pick assigned seekers.
+Two extensions are built from this one codebase:
 
-There is **no npm/webpack compile step**. A build copies `shared/` plus a thin overlay (`seeker/` or `recruiter/`) into `dist/` and applies `APPLICA_ENV` (API URL + manifest hosts).
+- **Seeker**: the public Chrome Web Store extension for job seekers. Signs in with your Applica account.
+- **Recruiter**: an unlisted extension for Applica recruiters who apply on behalf of the job seekers assigned to them. Signs in with a recruiter ID and key, and can only reach the seekers assigned to that recruiter. The server enforces that; nothing in this code grants extra access.
+
+There is **no npm/webpack compile step**. A build copies `shared/` plus a thin overlay (`seeker/` or `recruiter/`) into `dist/` and applies `APPLICA_ENV` (API URL and manifest hosts).
 
 ## Layout
 
 ```
-chrome_extensions/
-├── shared/              # Drawer, content script, background, shared lib (both builds)
-├── seeker/              # Public overlay: manifest, OAuth api.js, auth.html
-├── recruiter/           # Private overlay: manifest, recruiter api.js, icons
+.
+├── shared/              # Drawer, content script, background worker, shared lib (both builds)
+├── seeker/              # Seeker overlay: manifest, OAuth api.js, auth.html
+├── recruiter/           # Recruiter overlay: manifest, recruiter api.js, orange icons
 ├── scripts/
 │   ├── dev.sh           # Local dev: one extension, APPLICA_ENV=local
 │   ├── release.sh       # Store upload: APPLICA_ENV=production + zips
 │   ├── package.sh       # Core assemble script
 │   └── env.sh           # APPLICA_ENV → config.js + manifest hosts
-└── dist/                # Generated output — do not edit (gitignored)
+└── dist/                # Generated output; do not edit (gitignored)
 ```
 
-**Overlay wins:** `package.sh` copies `shared/` first, then `seeker/` or `recruiter/` on top.
+**Overlay wins:** `package.sh` copies `shared/` first, then `seeker/` or `recruiter/` on top. There is no shared manifest: each overlay has its own `manifest.json`, so set the version and permissions there.
 
-`drawer.js` reads `window.APPLICA_EXTENSION` (from each overlay’s `lib/extension-config.js`) for recruiter vs seeker behavior.
+`drawer.js` reads `window.APPLICA_EXTENSION` (from each overlay's `lib/extension-config.js`) for seeker vs recruiter behavior.
 
 ## Quick start
 
 ### Local development (localhost:4000)
 
-```bash
-cd chrome_extensions
+From the repo root:
 
-./scripts/dev.sh recruiter   # or: ./scripts/dev.sh seeker
+```bash
+./scripts/dev.sh seeker      # or: ./scripts/dev.sh recruiter
 ```
 
-Load unpacked in Chrome → `chrome_extensions/dist/recruiter` (or `dist/seeker`).
+In Chrome, open `chrome://extensions`, turn on Developer mode, choose **Load unpacked**, and pick `dist/seeker` (or `dist/recruiter`).
 
 After editing `shared/` or an overlay, re-run `./scripts/dev.sh` and click **Reload** on the extension card.
 
 ### Production build (app.getapplica.com)
 
 ```bash
-cd chrome_extensions
-
 ./scripts/release.sh              # both extensions + zips
-./scripts/release.sh recruiter    # recruiter only
+./scripts/release.sh seeker       # one extension
 ```
 
-Upload `applica-recruiter.zip` / `applica-seeker.zip` to the matching Chrome Web Store listing.
+Upload `applica-seeker.zip` / `applica-recruiter.zip` to the matching Chrome Web Store listing.
 
 Or manually:
 
@@ -64,16 +64,17 @@ APPLICA_ENV=production ./scripts/package.sh
 | `local` (default for dev.sh) | `http://localhost:4000` | localhost + `*.fly.dev` |
 | `production` | `https://app.getapplica.com` | `app.getapplica.com` |
 
-Build writes `dist/*/lib/config.js` and patches `dist/*/manifest.json`. Do not edit those by hand.
+The build writes `dist/*/lib/config.js` and patches `dist/*/manifest.json`. Do not edit those by hand.
 
 **Runtime override (debug only):** `chrome.storage.local` keys `applica_app_origin` / `applica_recruiter_app_origin` override the default if set. Clear them when switching environments.
 
-## Open source vs private recruiter
+## How the pieces talk
 
-- **Public (OSS):** `shared/` + `seeker/` — safe to publish on GitHub.
-- **Private:** `recruiter/` overlay only (~4 files). Keep in a private repo; pin to a release of the public shared code via submodule or copy.
+- **Background worker** (`shared/background.js`): opens and closes the drawer when you click the toolbar icon, and handles the keyboard shortcuts (seeker manifest `commands`).
+- **Content script** (`shared/content/content.js`): injected into the current tab on demand. Hosts the drawer iframe, reads the page for analysis, and fills application forms.
+- **Drawer** (`shared/drawer/`): an extension page in an iframe. Talks to the Applica API with the stored token.
 
-Never ship recruiter auth or the recruiter zip in the public seeker listing.
+The drawer and content script exchange messages only through Chrome extension messaging, never `window.postMessage`. A job site's own scripts can't read profile data sent for form fill, and can't send fake messages to the drawer.
 
 ## Script reference
 
@@ -85,8 +86,8 @@ Never ship recruiter auth or the recruiter zip in the public seeker listing.
 
 | Command | What it does |
 |---------|----------------|
-| `./scripts/dev.sh recruiter` | `dist/recruiter`, local API |
-| `./scripts/dev.sh seeker production` | `dist/seeker`, prod API |
+| `./scripts/dev.sh seeker` | `dist/seeker`, local API |
+| `./scripts/dev.sh recruiter production` | `dist/recruiter`, prod API |
 | `./scripts/release.sh` | Both `dist/*`, production, both zips |
 | `TARGET=seeker ./scripts/package.sh --no-zip` | Single target, no zip |
 
@@ -94,9 +95,9 @@ Never ship recruiter auth or the recruiter zip in the public seeker listing.
 
 ### Extension still hits localhost after prod build
 
-1. Re-run with production: `./scripts/dev.sh recruiter production`
+1. Re-run with production: `./scripts/dev.sh seeker production`
 2. Reload the extension in `chrome://extensions`
-3. Clear `applica_recruiter_app_origin` in extension storage if it was set during local dev
+3. Clear `applica_app_origin` (or `applica_recruiter_app_origin`) in extension storage if it was set during local dev
 
 ### Extension changes not showing
 
@@ -109,3 +110,7 @@ Never ship recruiter auth or the recruiter zip in the public seeker listing.
 - [`shared/README.md`](shared/README.md)
 - [`seeker/README.md`](seeker/README.md)
 - [`recruiter/README.md`](recruiter/README.md)
+
+## License
+
+[MIT](LICENSE)

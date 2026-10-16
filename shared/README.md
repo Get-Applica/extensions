@@ -4,7 +4,7 @@ Used by both seeker and recruiter builds. Assembled into `dist/` by [`../scripts
 
 ## Build
 
-From `chrome_extensions/`:
+From the repo root:
 
 ```bash
 ./scripts/dev.sh recruiter   # or seeker — see ../README.md
@@ -22,6 +22,8 @@ Do not load this folder directly in Chrome; use `../dist/seeker` or `../dist/rec
 | `lib/config.js`, `constants.js`, `util.js` | `recruiter/images/` (orange icons) |
 | `background.js` | `seeker/auth.html` (OAuth callback only) |
 | `images/` (seeker mint icons) | |
+
+There is no manifest here. Each build uses its overlay's `manifest.json`, so version bumps and permission changes go in `seeker/manifest.json` or `recruiter/manifest.json`.
 
 `drawer.js` reads `window.APPLICA_EXTENSION` for recruiter vs seeker login and picker behavior.
 

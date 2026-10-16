@@ -223,25 +223,21 @@
       );
     }
     const tracked = job.state !== 'ready';
+    // Only positive claims: "found" means the page publishes JobPosting data. Otherwise no pill.
     const statusPill = tracked
       ? pill('Saved to History', 'good', true)
       : page.detected
         ? pill('Job posting found', 'good', true)
-        : pill('No job posting found', null, true);
+        : '';
     const title = tracked ? job.title : page.title;
     const company = tracked ? job.company : page.company;
     let body = '';
     if (!tracked) {
       const a = ctx.analyze;
-      const primary = page.detected;
-      const label = primary ? 'Analyze this job' : 'Analyze anyway';
+      const label = page.detected ? 'Analyze this job' : 'Analyze this page';
       body =
-        (primary
-          ? jobRowHtml(title, company, page.host)
-          : '<p class="tb-caption">This page doesn’t look like a job posting. If it is one, you can still analyze it.</p>') +
-        '<button type="button" class="tb-btn tb-btn--block ' +
-        (primary ? 'tb-btn--primary' : 'tb-btn--secondary') +
-        '" data-tb-action="analyze"' +
+        jobRowHtml(title, company, page.host) +
+        '<button type="button" class="tb-btn tb-btn--block tb-btn--primary" data-tb-action="analyze"' +
         (a.disabled ? ' disabled' : '') +
         (a.disabledReason ? ' title="' + esc(a.disabledReason) + '"' : '') +
         '>' +

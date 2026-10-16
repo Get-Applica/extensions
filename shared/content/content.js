@@ -1,7 +1,8 @@
 /**
  * Applica Extension - Content Script
- * Injects a left-hand drawer that pops out when the extension is activated.
- * Also detects the app's extension callback page and stores the token so the background can close the tab.
+ * Injected on demand into the current tab. Hosts the right-hand drawer iframe, captures the page
+ * for analysis and fills application forms. On the Applica app's extension callback page it also
+ * exchanges the one-time sign-in code for a token, stores it, and closes the tab.
  */
 
 (function () {
@@ -130,114 +131,36 @@
     return drawerEl;
   }
 
-  function getDrawerContentWindow() {
-    const win = iframeEl?.contentWindow;
-    if (!win || win === window) return null;
-    return win;
-  }
-
-  async function copyToClipboardInPage(text) {
-    const value = text == null ? '' : String(text);
-    if (navigator.clipboard?.writeText) {
-      try {
-        await navigator.clipboard.writeText(value);
-        return;
-      } catch (_) {
-        // Fall through to execCommand below.
-      }
-    }
-    const textarea = document.createElement('textarea');
-    textarea.value = value;
-    textarea.setAttribute('readonly', '');
-    textarea.style.position = 'fixed';
-    textarea.style.top = '0';
-    textarea.style.left = '0';
-    textarea.style.width = '1px';
-    textarea.style.height = '1px';
-    textarea.style.opacity = '0';
-    textarea.style.pointerEvents = 'none';
-    document.body.appendChild(textarea);
-    textarea.focus({ preventScroll: true });
-    textarea.select();
-    textarea.setSelectionRange(0, value.length);
-    const copied = document.execCommand('copy');
-    document.body.removeChild(textarea);
-    if (!copied) {
-      throw new Error('Could not copy to clipboard.');
-    }
-  }
-
-  function sendCopyResultToDrawer(requestId, ok) {
-    const win = getDrawerContentWindow();
-    if (!win) return;
-    try {
-      win.postMessage({ type: 'applica-copy-to-clipboard-result', requestId, ok: !!ok }, DRAWER_POST_MESSAGE_TARGET);
-    } catch (e) {
-      console.debug('Applica: could not send copy result', e);
-    }
-  }
-
   /**
-   * Parent → drawer postMessage target. Use '*' because before the extension document loads the
-   * iframe is about:blank with the host page's origin (e.g. jobs.ashbyhq.com) while iframe.src
-   * already points at chrome-extension:// — a specific target origin then throws. Incoming
-   * messages are gated by event.source === iframeEl.contentWindow.
+   * Content script -> drawer. Extension messaging, never window.postMessage: the host page can't
+   * read it. Every extension page receives runtime messages, so the drawer keeps only the ones
+   * whose sender is frame 0 of its own tab.
    */
-  const DRAWER_POST_MESSAGE_TARGET = '*';
-
   function postToDrawer(message) {
-    const win = getDrawerContentWindow();
-    if (!win) return;
     try {
-      win.postMessage(message, DRAWER_POST_MESSAGE_TARGET);
+      chrome.runtime.sendMessage(message, () => {
+        void chrome.runtime.lastError;
+      });
     } catch (e) {
-      console.debug('Applica: could not post to drawer', e);
+      console.debug('Applica: could not message drawer', e);
     }
   }
 
-  function postPageDataToDrawer(drawerWindow, payload) {
-    if (!drawerWindow || drawerWindow === window) return;
-    const win = getDrawerContentWindow();
-    if (!win || drawerWindow !== win) return;
-    try {
-      drawerWindow.postMessage(payload, DRAWER_POST_MESSAGE_TARGET);
-    } catch (e) {
-      console.debug('Applica: could not post page data to drawer', e);
-    }
+  const DRAWER_PAGE_URL = getExtensionURL('drawer/drawer.html');
+
+  /** Drawer -> content script messages arrive via chrome.tabs.sendMessage from the drawer page. */
+  function isFromDrawer(sender) {
+    return (
+      sender?.id === chrome.runtime.id &&
+      !!DRAWER_PAGE_URL &&
+      typeof sender.url === 'string' &&
+      sender.url.startsWith(DRAWER_PAGE_URL)
+    );
   }
 
-  /** Hosts that only serve job postings / applications (any page on them counts). */
-  const JOB_SITE_HOSTS = [
-    /(^|\.)lever\.co$/,
-    /(^|\.)greenhouse\.io$/,
-    /(^|\.)ashbyhq\.com$/,
-    /(^|\.)myworkdayjobs\.com$/,
-    /(^|\.)myworkdaysite\.com$/,
-    /(^|\.)smartrecruiters\.com$/,
-    /(^|\.)jobvite\.com$/,
-    /(^|\.)icims\.com$/,
-    /(^|\.)bamboohr\.com$/,
-    /(^|\.)workable\.com$/,
-    /(^|\.)recruitee\.com$/,
-    /(^|\.)breezy\.hr$/,
-    /(^|\.)teamtailor\.com$/,
-    /(^|\.)applytojob\.com$/,
-    /(^|\.)wellfound\.com$/
-  ];
-
-  /** Boards that also serve non-job pages: only specific job URLs count. */
-  function isJobBoardJobUrl(url) {
-    const host = url.hostname;
-    if (/(^|\.)linkedin\.com$/.test(host)) {
-      return url.pathname.startsWith('/jobs/view/') || url.searchParams.has('currentJobId');
-    }
-    if (/(^|\.)indeed\.com$/.test(host)) {
-      return url.pathname.startsWith('/viewjob') || url.searchParams.has('vjk') || url.searchParams.has('jk');
-    }
-    if (/(^|\.)glassdoor\.[a-z.]+$/.test(host)) {
-      return url.pathname.includes('/job-listing/') || url.searchParams.has('jl');
-    }
-    return false;
+  /** Toggle and shortcut commands come from the background worker (no tab, our extension id). */
+  function isFromBackground(sender) {
+    return sender?.id === chrome.runtime.id && !sender.tab && !isFromDrawer(sender);
   }
 
   function findJobPostingNode(node) {
@@ -261,10 +184,12 @@
   }
 
   /**
-   * Cheap check for "is this a job posting?" so the drawer can say so before analyzing.
-   * Structured data (schema.org JobPosting) first, then known job sites. Never throws.
+   * Positive-only job check for the drawer label. `found` is true only when the page publishes a
+   * schema.org JobPosting; otherwise we make no claim and the server decides when analyzing.
+   * `pageTitle` is always sent so the drawer can label the page either way. Never throws.
    */
   function detectJobPosting() {
+    const pageTitle = textOrNull(document.title);
     try {
       const scripts = document.querySelectorAll('script[type="application/ld+json"]');
       for (const script of scripts) {
@@ -279,19 +204,14 @@
           const org = posting.hiringOrganization;
           return {
             found: true,
-            source: 'structured-data',
             title: textOrNull(posting.title),
-            company: textOrNull(typeof org === 'string' ? org : org?.name)
+            company: textOrNull(typeof org === 'string' ? org : org?.name),
+            pageTitle
           };
         }
       }
-      const url = new URL(window.location.href);
-      if (JOB_SITE_HOSTS.some((re) => re.test(url.hostname)) || isJobBoardJobUrl(url)) {
-        // No structured data: the tab title ("Senior Engineer - Acme | Lever") is the best label we have.
-        return { found: true, source: 'job-site', title: textOrNull(document.title), company: null };
-      }
     } catch (_) {}
-    return { found: false, source: null, title: null, company: null };
+    return { found: false, title: null, company: null, pageTitle };
   }
 
   function notifyDrawerOpened() {
@@ -375,7 +295,7 @@
     drawerEl.classList.add('applica-drawer-visible');
     document.documentElement.style.setProperty('--applica-drawer-width', `${DRAWER_WIDTH}px`);
     startSpaUrlWatch();
-    /* notifyDrawerOpened runs on iframe load and applica-drawer-ready (extension doc must be loaded) */
+    /* notifyDrawerOpened runs on applica-drawer-ready (and iframe load, which the drawer ignores until it knows its tab) */
   }
 
   function closeDrawer() {
@@ -391,10 +311,7 @@
     isOpen ? closeDrawer() : openDrawer();
   }
 
-  window.addEventListener('applica-drawer-toggle', toggleDrawer);
-
-  window.addEventListener('applica-drawer-command', (event) => {
-    const command = event?.detail?.command;
+  function runDrawerCommand(command) {
     if (typeof command !== 'string') return;
     pendingDrawerCommand = command;
     if (!isOpen) {
@@ -405,7 +322,7 @@
       }
     }
     flushPendingDrawerCommand();
-  });
+  }
 
   const MAX_ANALYZE_HTML_CHARS = 450000;
   const ANALYZE_HTML_SELECTORS = [
@@ -473,14 +390,23 @@
     return { html, truncated, source };
   }
 
-  // Listen for messages from the drawer iframe
-  window.addEventListener('message', (event) => {
-    if (event.source !== iframeEl?.contentWindow) return;
-    if (event.data?.type === 'applica-drawer-close') {
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (isFromBackground(sender)) {
+      if (message?.type === 'applica-drawer-toggle') toggleDrawer();
+      if (message?.type === 'applica-drawer-command') runDrawerCommand(message.command);
+      sendResponse({ ok: true });
+      return;
+    }
+    if (isFromDrawer(sender)) handleDrawerMessage(message);
+  });
+
+  /** Messages from the drawer iframe (see isFromDrawer). */
+  function handleDrawerMessage(data) {
+    if (data?.type === 'applica-drawer-close') {
       closeDrawer();
       return;
     }
-    if (event.data?.type === 'applica-drawer-ready') {
+    if (data?.type === 'applica-drawer-ready') {
       drawerDocReady = true;
       if (isOpen) {
         lastNotifiedPageUrl = window.location.href;
@@ -491,14 +417,12 @@
       }
       return;
     }
-    if (event.data?.type === 'applica-analyze-current-page') {
-      const drawerWindow = getDrawerContentWindow();
-      if (!drawerWindow || event.source !== drawerWindow) return;
-      const requestId = event.data.requestId;
+    if (data?.type === 'applica-analyze-current-page') {
+      const requestId = data.requestId;
       try {
         const url = window.location.href;
         const captured = capturePageHtmlForAnalyze();
-        postPageDataToDrawer(drawerWindow, {
+        postToDrawer({
           type: 'applica-page-data',
           requestId,
           url,
@@ -508,58 +432,40 @@
         });
       } catch (e) {
         console.debug('Applica: could not get page HTML', e);
-        postPageDataToDrawer(drawerWindow, {
+        postToDrawer({
           type: 'applica-page-data',
           requestId,
           error: e?.message || 'Failed to get page'
         });
       }
     }
-    if (event.data?.type === 'applica-navigate-to' && event.data.url) {
+    if (data?.type === 'applica-navigate-to' && data.url) {
       // Legacy same-tab navigation; prefer applica-open-tab to preserve drawer context.
-      const url = event.data.url;
+      const url = data.url;
       chrome.runtime.sendMessage({ type: 'applica-will-navigate', url }, (response) => {
         if (chrome.runtime.lastError) return;
         window.location.href = url;
       });
     }
-    if (event.data?.type === 'applica-open-tab' && event.data.url) {
-      chrome.runtime.sendMessage({ type: 'applica-open-tab', url: event.data.url }, () => {
+    if (data?.type === 'applica-open-tab' && data.url) {
+      chrome.runtime.sendMessage({ type: 'applica-open-tab', url: data.url }, () => {
         if (chrome.runtime.lastError) {
           console.debug('Applica: could not open tab', chrome.runtime.lastError);
         }
       });
     }
-    if (event.data?.type === 'applica-fill-form-with-data' && event.data.form_data) {
-      handleFillFormWithData(event.source, event.data.form_data);
+    if (data?.type === 'applica-fill-form-with-data' && data.form_data) {
+      handleFillFormWithData(data.form_data);
     }
-    if (event.data?.type === 'applica-copy-to-clipboard') {
-      const requestId = event.data.requestId;
-      copyToClipboardInPage(event.data.text)
-        .then(() => sendCopyResultToDrawer(requestId, true))
-        .catch((e) => {
-          console.debug('Applica: copy failed', e);
-          sendCopyResultToDrawer(requestId, false);
-        });
-    }
-  });
+  }
 
   /**
    * Fill matching form fields on the page using form_data from the drawer.
    * The drawer (extension iframe) fetches form_details; we only run in page context to access the DOM.
    */
-  async function handleFillFormWithData(drawerWindow, formData) {
-    const win = getDrawerContentWindow();
+  async function handleFillFormWithData(formData) {
     const sendResult = (result) => {
-      if (!win || drawerWindow !== win) return;
-      try {
-        win.postMessage(
-          { type: 'applica-fill-form-result', ...result },
-          DRAWER_POST_MESSAGE_TARGET
-        );
-      } catch (e) {
-        console.debug('Applica: could not send fill-form result', e);
-      }
+      postToDrawer({ type: 'applica-fill-form-result', ...result });
     };
     try {
       const enrichedFormData = enrichFormDataWithSplitNames(formData);

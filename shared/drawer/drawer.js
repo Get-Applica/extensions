@@ -18,7 +18,7 @@
   let tabbedTab = 'analyze';
   let tabbedPersonasState = { loaded: false, error: null };
   let tabbedOpeningsError = null;
-  /** { found, source, title, company } from content.js detectJobPosting(). */
+  /** { found, title, company, pageTitle } from content.js detectJobPosting(). found = JobPosting data. */
   let currentPageJob = null;
   /** Most recent form fill on this page: { openingId, pending, result }. */
   let tabbedFill = null;
@@ -156,7 +156,6 @@
 
   let applicantCopyValueSeq = 0;
   const applicantCopyValues = new Map();
-  let copyRequestSeq = 0;
 
   function rememberApplicantCopyValue(value) {
     const id = String(++applicantCopyValueSeq);
@@ -226,34 +225,12 @@
     }, 1200);
   }
 
-  async function copyViaParent(text) {
-    if (window.parent === window) {
-      return copyToClipboard(text);
-    }
-    return new Promise((resolve, reject) => {
-      const requestId = String(++copyRequestSeq);
-      const timeoutId = window.setTimeout(() => {
-        window.removeEventListener('message', onResult);
-        reject(new Error('Copy timed out'));
-      }, 5000);
-      function onResult(event) {
-        if (!isTrustedParentMessage(event)) return;
-        if (event.data?.type !== 'applica-copy-to-clipboard-result') return;
-        if (event.data.requestId !== requestId) return;
-        window.removeEventListener('message', onResult);
-        window.clearTimeout(timeoutId);
-        if (event.data.ok) resolve();
-        else reject(new Error('Copy failed'));
-      }
-      window.addEventListener('message', onResult);
-      postToParent({ type: 'applica-copy-to-clipboard', text, requestId });
-    });
-  }
-
   async function handleApplicantCopyClick(copyBtn) {
     const copyId = copyBtn.getAttribute('data-copy-id');
     const value = readApplicantCopyValue(copyId);
-    await copyViaParent(value);
+    // Copy inside the drawer (iframe has allow="clipboard-write"). Values such as passwords never
+    // pass through the host page.
+    await copyToClipboard(value);
     showApplicantCopyFeedback(copyBtn);
   }
 
@@ -375,16 +352,66 @@
     }
   }
 
-  function isTrustedParentMessage(event) {
-    if (window.parent === window) return true;
-    return event.source === window.parent;
+  /*
+   * Drawer <-> content script transport.
+   *
+   * Never window.postMessage: messages to window.parent are readable by the host page's own
+   * scripts (form data, profile details), and the page can post forged messages into this iframe.
+   * Instead: chrome.tabs.sendMessage to frame 0 of our tab out, chrome.runtime.onMessage in,
+   * keeping only messages whose sender is our content script in that same tab.
+   */
+  const inHostPage = window.parent !== window;
+  let hostTabId = null;
+  const contentOutbox = [];
+
+  function postToContent(message) {
+    if (!inHostPage) return;
+    if (hostTabId == null) {
+      contentOutbox.push(message);
+      return;
+    }
+    try {
+      chrome.tabs.sendMessage(hostTabId, message, { frameId: 0 }, () => {
+        void chrome.runtime.lastError;
+      });
+    } catch (_) {
+      // Extension context invalidated
+    }
   }
 
-  function postToParent(message) {
-    if (window.parent === window) return;
-    // Host page origin is validated in content.js (event.source === iframe); '*' avoids
-    // mismatches when parentPageOrigin is stale after refresh or extension reload.
-    window.parent.postMessage(message, '*');
+  /** Ask the background worker which tab this iframe is in, then flush anything queued. */
+  function resolveHostTab() {
+    if (!inHostPage) return;
+    try {
+      chrome.runtime.sendMessage({ type: 'applica-drawer-whoami' }, (response) => {
+        if (chrome.runtime.lastError || response?.tabId == null) {
+          console.debug('Applica: could not identify the drawer tab', chrome.runtime.lastError);
+          return;
+        }
+        hostTabId = response.tabId;
+        contentOutbox.splice(0).forEach(postToContent);
+      });
+    } catch (_) {
+      // Extension context invalidated
+    }
+  }
+
+  function isFromOurContentScript(sender) {
+    return (
+      sender?.id === chrome.runtime.id &&
+      hostTabId != null &&
+      sender.tab?.id === hostTabId &&
+      sender.frameId === 0
+    );
+  }
+
+  function senderOrigin(sender) {
+    if (typeof sender?.origin === 'string') return sender.origin;
+    try {
+      return new URL(sender.url).origin;
+    } catch (_) {
+      return '';
+    }
   }
 
   function clearAnalyzePageDataTimeout(requestId) {
@@ -1537,9 +1564,15 @@
       path.match(/\/jobs\/view\/(\d+)/) ||
       path.match(/\/job\/view\/([^/]+)/) ||
       path.match(/\/jobs\/(\d+)(?:\/|$)/) ||
-      path.match(/\/job\/(\d+)(?:\/|$)/);
-    return pathMatch ? pathMatch[1] : null;
+      path.match(/\/job\/(\d+)(?:\/|$)/) ||
+      // A UUID segment identifies the posting on Ashby, Lever and others, and stays the same on
+      // its /application and /apply pages (jobs.ashbyhq.com/acme/<uuid>/application).
+      path.match(/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/|$)/i);
+    return pathMatch ? pathMatch[1].toLowerCase() : null;
   }
+
+  /** Trailing "apply" pages of a posting (…/Engineer_R123/apply/applyManually) are the same job. */
+  const APPLY_PATH_SUFFIX = /(?:\/(?:apply|application|applications|applymanually|apply-now|applynow))+\/?$/;
 
   function normalizeUrlForCompare(url) {
     if (!url || typeof url !== 'string') return '';
@@ -1548,7 +1581,7 @@
       const parsed = new URL(u);
       const jobId = extractJobIdentity(parsed);
       if (jobId) return parsed.origin + '/__job__/' + jobId;
-      u = parsed.origin + parsed.pathname;
+      u = parsed.origin + parsed.pathname.replace(APPLY_PATH_SUFFIX, '');
     } catch (_) {}
     return u.endsWith('/') && u.length > 1 ? u.slice(0, -1) : u;
   }
@@ -2381,20 +2414,22 @@
   let currentPageUrl = null;
   let lastOpeningsPayload = null;
 
-  window.addEventListener('message', async (event) => {
-    if (!isTrustedParentMessage(event)) return;
-
-    if (event.data?.type === 'applica-drawer-opened') {
-      rememberParentPageOrigin(event.data.pageOrigin);
+  /** Messages from our content script (sender-checked in the runtime.onMessage listener below). */
+  async function handleContentMessage(data, origin) {
+    if (data?.type === 'applica-drawer-opened') {
+      rememberParentPageOrigin(data.pageOrigin);
       if (!isHttpPageOrigin(parentPageOrigin)) {
-        rememberParentPageOrigin(event.origin);
+        rememberParentPageOrigin(origin);
       }
       if (!isHttpPageOrigin(parentPageOrigin)) return;
       const previousPageUrl = currentPageUrl;
-      currentPageUrl = event.data.currentPageUrl || null;
+      currentPageUrl = data.currentPageUrl || null;
       if (tabbedLayout) {
-        currentPageJob = event.data.pageJob || null;
-        if (previousPageUrl !== currentPageUrl) tabbedFill = null;
+        currentPageJob = data.pageJob || null;
+        // Moving from a posting to its application form is the same job: keep the fill result.
+        if (normalizeUrlForCompare(previousPageUrl) !== normalizeUrlForCompare(currentPageUrl)) {
+          tabbedFill = null;
+        }
       }
       if (lastOpeningsPayload) renderOpenings(lastOpeningsPayload);
       if (lastApplicationsPayload) renderApplications(lastApplicationsPayload);
@@ -2429,21 +2464,21 @@
       syncAnalyzeJobButtonState();
       return;
     }
-    if (event.data?.type === 'applica-page-data') {
-      if (!isHttpPageOrigin(event.origin)) return;
-      handlePageDataForAnalyze(event.data);
+    if (data?.type === 'applica-page-data') {
+      if (!isHttpPageOrigin(origin)) return;
+      handlePageDataForAnalyze(data);
     }
-    if (event.data?.type === 'applica-show-api-error-banner') {
-      if (!isHttpPageOrigin(event.origin)) return;
+    if (data?.type === 'applica-show-api-error-banner') {
+      if (!isHttpPageOrigin(origin)) return;
       showApiErrorBanner();
     }
-    if (event.data?.type === 'applica-run-command') {
-      if (tabbedLayout) runTabbedCommand(event.data.command);
+    if (data?.type === 'applica-run-command') {
+      if (tabbedLayout) runTabbedCommand(data.command);
       return;
     }
-    if (event.data?.type === 'applica-fill-form-result') {
-      if (!isHttpPageOrigin(event.origin)) return;
-      const r = event.data;
+    if (data?.type === 'applica-fill-form-result') {
+      if (!isHttpPageOrigin(origin)) return;
+      const r = data;
       if (tabbedLayout) {
         if (tabbedFillTimeoutId) {
           clearTimeout(tabbedFillTimeoutId);
@@ -2483,7 +2518,7 @@
         setTimeout(() => setAnalyzeStatus('', ''), 4000);
       }
     }
-  });
+  }
 
   let openingsPollIntervalId = null;
   let openingsPollDelayId = null;
@@ -2776,7 +2811,7 @@
     const sameTab = options.sameTab === true;
     saveApplicationsViewState();
     if (window.parent !== window) {
-      postToParent({ type: sameTab ? 'applica-navigate-to' : 'applica-open-tab', url });
+      postToContent({ type: sameTab ? 'applica-navigate-to' : 'applica-open-tab', url });
     } else if (sameTab) {
       window.location.href = url;
     } else {
@@ -3284,7 +3319,7 @@
         setAnalyzeStatus('error', 'Invalid response: form_data missing.');
         return false;
       }
-      postToParent({ type: 'applica-fill-form-with-data', form_data: formData });
+      postToContent({ type: 'applica-fill-form-with-data', form_data: formData });
       return true;
     } catch (err) {
       showApiErrorBanner();
@@ -3390,7 +3425,7 @@
       }, ANALYZE_PAGE_DATA_TIMEOUT_MS);
       pendingAnalyzeByRequestId.set(requestId, { personaId, timeoutId });
       scheduleTabbedRender();
-      postToParent({ type: 'applica-analyze-current-page', requestId });
+      postToContent({ type: 'applica-analyze-current-page', requestId });
     } else {
       cancelPendingAnalyze();
       setAnalyzeStatus('error', 'Open the drawer on a job page to analyze it.');
@@ -3472,7 +3507,7 @@
   });
 
   closeDrawerBtn.addEventListener('click', () => {
-    postToParent({ type: 'applica-drawer-close' });
+    postToContent({ type: 'applica-drawer-close' });
   });
 
   const authStorageChanged = (changes, areaName) => {
@@ -3701,7 +3736,7 @@
       inFrame: window.parent !== window && !!currentPageUrl,
       host: hostOf(currentPageUrl),
       detected: !!currentPageJob?.found,
-      title: currentPageJob?.title || null,
+      title: currentPageJob?.title || currentPageJob?.pageTitle || null,
       company: currentPageJob?.company || null
     };
 
@@ -4357,11 +4392,22 @@
     setTabbedTab('analyze');
   }
 
+  try {
+    chrome.runtime.onMessage.addListener((message, sender) => {
+      if (!isFromOurContentScript(sender)) return;
+      handleContentMessage(message, senderOrigin(sender));
+    });
+  } catch (_) {
+    // Extension context invalidated
+  }
+
   initTabbedLayout();
   refreshAuthState();
 
-  // Tell parent we're ready so it can send drawer-opened and/or push personas (avoids race after extension reload)
-  if (window.parent !== window) {
-    postToParent({ type: 'applica-drawer-ready' });
+  // Tell the content script we're ready so it sends drawer-opened (avoids a race after extension
+  // reload). Queued until resolveHostTab() learns which tab we're in.
+  if (inHostPage) {
+    postToContent({ type: 'applica-drawer-ready' });
+    resolveHostTab();
   }
 })();

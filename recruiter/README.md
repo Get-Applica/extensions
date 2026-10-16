@@ -24,4 +24,4 @@ See [`../README.md`](../README.md) for full build instructions.
 
 Recruiter UI behavior (login form, seeker picker, account-setup emails) is driven by `extension-config.js` and branches in `shared/drawer/drawer.js`.
 
-Never ship these files in the public seeker zip.
+This overlay is public like the rest of the repo; it holds no credentials. Recruiters sign in with their own ID and key, and the API only returns seekers assigned to that recruiter. Keep these files out of the seeker build: `package.sh` builds each target from `shared/` plus its own overlay only.
