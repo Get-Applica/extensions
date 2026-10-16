@@ -10,6 +10,8 @@
     features: {
       applications: true,
       hiringCafe: true,
+      /** Seeker Analyze/History tabs (drawer/tabbed.*). Recruiter keeps the worklist layout. */
+      tabbedLayout: false,
     },
   };
 

@@ -7,7 +7,7 @@ Only files that **differ** from `../shared/` belong here. Everything else is sha
 ```bash
 cd ..
 ./scripts/dev.sh seeker             # local: dist/seeker
-./scripts/package.sh --from-source  # release: dist/seeker + applica-seeker.zip
+./scripts/release.sh seeker         # release: dist/seeker + applica-seeker.zip
 ```
 
 See [`../README.md`](../README.md) for full build instructions.

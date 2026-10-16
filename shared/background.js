@@ -1,8 +1,13 @@
 /**
  * Applica Extension - Background Service Worker
  * Toggles the drawer when the extension icon is clicked. Job sites use activeTab + scripting
- * (user gesture) for on-demand injection. host_permissions cover the Applica app origin only
- * (API + sign-in). content_scripts on app.getapplica.com handle the login callback page.
+ * (user gesture) for on-demand injection. host_permissions cover the Applica app origin
+ * (API + sign-in; see scripts/env.sh). The manifest's content_scripts entry on that origin handles
+ * the sign-in callback page.
+ *
+ * Drawer <-> content script traffic never uses window.postMessage (the host page could read or
+ * forge it): the drawer uses chrome.tabs.sendMessage to frame 0 of its tab, the content script
+ * uses chrome.runtime.sendMessage, and each side checks the sender.
  */
 
 importScripts('lib/extension-config.js', 'lib/constants.js');
@@ -27,17 +32,33 @@ async function injectDrawerContentScript(tabId) {
   });
 }
 
-async function toggleDrawerOnTab(tabId) {
+/**
+ * Deliver a message to our content script in the tab's top frame. Extension messaging, not window
+ * events, so the host page can't trigger these itself.
+ */
+async function sendToContentScript(tabId, message) {
   await injectDrawerContentScript(tabId);
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: () => {
-      window.dispatchEvent(new CustomEvent('applica-drawer-toggle'));
-    }
+  await new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, message, { frameId: 0 }, () => {
+      void chrome.runtime.lastError;
+      resolve();
+    });
   });
 }
 
+async function toggleDrawerOnTab(tabId) {
+  await sendToContentScript(tabId, { type: 'applica-drawer-toggle' });
+}
+
+const DRAWER_PAGE_URL = chrome.runtime.getURL('drawer/drawer.html');
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // The drawer iframe asks which tab it lives in, so it can message that tab's content script.
+  if (message?.type === 'applica-drawer-whoami') {
+    const fromDrawer = sender.id === chrome.runtime.id && sender.url?.startsWith(DRAWER_PAGE_URL);
+    sendResponse({ tabId: fromDrawer && sender.tab?.id != null ? sender.tab.id : null });
+    return;
+  }
   if (message?.type === 'applica-will-navigate' && message.url) {
     chrome.storage.local.set({ [REOPEN_DRAWER_TS_KEY]: Date.now() }, () => {
       sendResponse({ ok: true });
@@ -64,6 +85,22 @@ chrome.action.onClicked.addListener((tab) => {
     console.debug('Applica: could not toggle drawer', e);
   });
 });
+
+/** Keyboard shortcuts (seeker manifest `commands`). Invoking one grants activeTab on the page. */
+const DRAWER_COMMANDS = new Set(['analyze-job', 'fill-form']);
+
+async function runDrawerCommandOnTab(tabId, command) {
+  await sendToContentScript(tabId, { type: 'applica-drawer-command', command });
+}
+
+if (chrome.commands?.onCommand) {
+  chrome.commands.onCommand.addListener((command, tab) => {
+    if (!DRAWER_COMMANDS.has(command) || !tab?.id) return;
+    runDrawerCommandOnTab(tab.id, command).catch((e) => {
+      console.debug('Applica: could not run shortcut', command, e);
+    });
+  });
+}
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete' || !tab?.url?.startsWith('http')) return;
