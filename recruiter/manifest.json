@@ -1,0 +1,42 @@
+{
+  "name": "Applica Recruiter Extension",
+  "description": "Applica Recruiter Extension - right-hand drawer for managed seekers",
+  "version": "1.1.4",
+  "manifest_version": 3,
+  "permissions": [
+    "activeTab",
+    "clipboardWrite",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://localhost:4000/*",
+    "https://*.fly.dev/*"
+  ],
+  "action": {
+    "default_icon": "images/applica_logo.png",
+    "default_title": "Toggle Applica recruiter drawer"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "lib/config.js",
+        "lib/extension-config.js",
+        "lib/constants.js",
+        "lib/util.js",
+        "lib/api.js",
+        "drawer/drawer.html",
+        "drawer/drawer.css",
+        "drawer/drawer.js",
+        "images/applica_logo.png"
+      ],
+      "matches": [
+        "https://*/*"
+      ]
+    }
+  ]
+}

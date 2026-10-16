@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Applica</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="drawer.css" />
+</head>
+<body>
+  <div id="app">
+    <div id="api-error-banner" class="drawer-api-error-banner" role="alert" hidden>
+      We're having some problems. Please check back in a moment.
+    </div>
+
+    <section class="drawer-section" id="login-section" hidden>
+      <div id="login-seeker" hidden>
+        <h2 class="drawer-heading">Sign in</h2>
+        <p class="drawer-hint">Sign in opens in a new tab. After signing in you’ll be redirected back and that tab will close.</p>
+        <button type="button" class="btn btn-secondary" id="open-login-tab">Sign in</button>
+      </div>
+      <div id="login-recruiter" hidden>
+        <h2 class="drawer-heading">Recruiter sign in</h2>
+        <p class="drawer-hint">Paste the login URL from your Applica recruiter account.</p>
+        <form id="recruiter-login-form" class="drawer-login-form">
+          <label class="drawer-field-label" for="recruiter-login-url">Login URL</label>
+          <input
+            type="text"
+            id="recruiter-login-url"
+            class="drawer-field-input"
+            autocomplete="off"
+            placeholder="https://app.getapplica.com/recruiter/login?token=…"
+            required
+          />
+          <p id="login-error" class="drawer-hint drawer-login-error" hidden></p>
+          <button type="submit" class="btn btn-primary" id="recruiter-login-btn">Sign in</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="drawer-section drawer-section-top" id="score-queue-section" hidden>
+      <div id="drawer-list-only-block">
+        <div class="drawer-top-cluster">
+        <div id="drawer-profile-card" class="drawer-profile-card drawer-profile-card--single">
+          <div class="drawer-profile-card-inner">
+            <div class="drawer-profile-row">
+              <div id="drawer-profile-picker-block" class="drawer-profile-picker-block" hidden>
+                <span class="drawer-profile-label" id="drawer-persona-picker-label">Profile</span>
+                <div class="drawer-profile-picker-wrap">
+                  <select id="applica-persona-picker" class="drawer-profile-select" aria-label="Select profile">
+                    <option value="">Loading…</option>
+                  </select>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="drawer-profile-chevron" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
+                </div>
+              </div>
+              <a id="drawer-profile-resume-single" class="drawer-profile-resume-single">—</a>
+              <div class="drawer-profile-score-wrap">
+                <span class="drawer-profile-score-label">Job Role</span>
+                <div class="drawer-profile-score-compact">
+                  <span id="applica-profile-score" class="drawer-profile-score-value">—</span>
+                  <span class="drawer-profile-score-suffix">/ 100</span>
+                </div>
+                <span id="applica-profile-score-badge" class="drawer-profile-score-badge" hidden></span>
+              </div>
+            </div>
+            <div id="drawer-profile-resume-row" class="drawer-profile-resume">
+              <span class="drawer-profile-resume-label">Current Resume:</span>
+              <a id="applica-profile-resume" class="drawer-profile-resume-name" title="">—</a>
+            </div>
+            <div id="drawer-profile-preferences" class="drawer-profile-preferences is-collapsed" hidden>
+              <button
+                type="button"
+                id="drawer-profile-preferences-toggle"
+                class="drawer-profile-preferences-toggle"
+                aria-expanded="false"
+                aria-controls="drawer-profile-preferences-body"
+              >
+                <span class="drawer-profile-preferences-title">Profile preferences</span>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="drawer-profile-preferences-chevron" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
+              </button>
+              <div id="drawer-profile-preferences-body" class="drawer-profile-preferences-body"></div>
+            </div>
+            <div class="drawer-profile-actions">
+              <a id="applica-profile-manage-link" class="btn btn-secondary drawer-profile-action-btn" href="#" target="_blank" rel="noopener">Open in Applica</a>
+              <a id="applica-profile-hiring-cafe-link" class="btn btn-secondary drawer-profile-action-btn" href="#" target="_blank" rel="noopener" hidden>Hiring Cafe</a>
+            </div>
+          </div>
+        </div>
+        <button type="button" class="btn btn-primary drawer-analyze-btn" id="analyze-job-posting-btn">Analyze job posting</button>
+        </div>
+      </div>
+
+      <p id="analyze-status" class="drawer-hint drawer-global-status" hidden></p>
+
+      <div id="setup-emails-section-content" hidden>
+        <div class="drawer-worklist-card drawer-setup-emails-card is-collapsed">
+          <button
+            type="button"
+            id="setup-emails-section-toggle"
+            class="drawer-setup-emails-toggle drawer-worklist-card-header"
+            aria-expanded="false"
+            aria-controls="setup-emails-card-body"
+          >
+            <div class="drawer-worklist-header-row">
+              <div class="drawer-worklist-icon-wrap drawer-setup-emails-icon-wrap">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="drawer-worklist-icon" aria-hidden="true"><rect width="20" height="16" x="2" y="4" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg>
+              </div>
+              <span class="drawer-worklist-title">Account setup</span>
+              <span id="setup-emails-new-badge" class="drawer-setup-emails-new-badge" hidden></span>
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="drawer-setup-emails-chevron" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
+            </div>
+            <p class="drawer-worklist-subtitle">Verification and forwarding shown first.</p>
+          </button>
+          <div id="setup-emails-card-body" class="drawer-worklist-card-body" hidden>
+            <div id="setup-emails-list" class="drawer-setup-emails-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="score-queue-section-content" hidden>
+        <div class="drawer-queue-card">
+          <div class="drawer-queue-card-header">
+            <div class="drawer-queue-header-row">
+              <div class="drawer-queue-icon-wrap">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="drawer-queue-icon" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+              </div>
+              <span class="drawer-queue-title">Processing Queue</span>
+            </div>
+          </div>
+          <div class="drawer-queue-card-body">
+            <div id="score-queue-list" class="drawer-queue-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="openings-section-content">
+        <div id="openings-list-view" class="drawer-worklist-card">
+          <div class="drawer-worklist-card-header">
+            <div class="drawer-worklist-header-row">
+              <div class="drawer-worklist-icon-wrap">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="drawer-worklist-icon" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg>
+              </div>
+              <span class="drawer-worklist-title">Apply Queue</span>
+              <div id="openings-section-badge" class="drawer-openings-badge-wrap"></div>
+            </div>
+            <div class="drawer-worklist-subheader-row">
+              <p class="drawer-worklist-subtitle">Click a card to view details and fill out forms.</p>
+              <div id="openings-bulk-delete-toolbar" class="drawer-bulk-delete-toolbar" hidden>
+                <div class="drawer-bulk-delete-wrap">
+                  <button
+                    type="button"
+                    id="openings-bulk-delete-toggle"
+                    class="drawer-bulk-delete-btn"
+                    aria-expanded="false"
+                    aria-haspopup="true"
+                    aria-controls="openings-bulk-delete-menu"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>
+                    Bulk Delete
+                    <svg id="openings-bulk-delete-chevron" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
+                  </button>
+                  <div id="openings-bulk-delete-menu" class="drawer-bulk-delete-menu" hidden role="menu" aria-label="Bulk delete by score">
+                    <p class="drawer-bulk-delete-menu-label">Delete Scores</p>
+                    <button type="button" class="drawer-bulk-delete-option" data-bulk-delete-score="40" role="menuitem">Below 40</button>
+                    <button type="button" class="drawer-bulk-delete-option" data-bulk-delete-score="50" role="menuitem">Below 50</button>
+                    <button type="button" class="drawer-bulk-delete-option" data-bulk-delete-score="60" role="menuitem">Below 60</button>
+                    <button type="button" class="drawer-bulk-delete-option" data-bulk-delete-score="70" role="menuitem">Below 70</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="drawer-worklist-card-body">
+            <div id="openings-section-hint" class="drawer-openings-hint"></div>
+            <div id="openings-list" class="drawer-worklist-list"></div>
+          </div>
+        </div>
+        <div id="opening-detail-view" class="drawer-opening-detail" hidden>
+          <button type="button" class="drawer-opening-detail-back" id="opening-detail-back" aria-label="Back to worklist">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+            Back
+          </button>
+          <div id="opening-detail-company-avoid-warning" class="drawer-opening-warning drawer-opening-warning--danger" role="alert" hidden>
+            <p class="drawer-opening-warning-title">Warning: Company to Avoid</p>
+            <p class="drawer-opening-warning-text">This company matches one on the seeker's "Companies to Avoid" list. Please verify before proceeding.</p>
+          </div>
+          <div id="opening-detail-interview-warning" class="drawer-opening-warning drawer-opening-warning--caution" role="alert" hidden>
+            <p class="drawer-opening-warning-title">Warning: Interview in Progress</p>
+            <p class="drawer-opening-warning-text">This seeker already has an application at this company in the interview stage. Review existing applications below before continuing.</p>
+          </div>
+          <div id="opening-detail-matching-apps" class="drawer-detail-matching-apps" role="status" aria-label="Matching applications" hidden>
+            <div class="drawer-detail-matching-apps-title"></div>
+            <ul class="drawer-detail-matching-apps-list"></ul>
+          </div>
+          <div class="drawer-opening-detail-header">
+            <h3 id="opening-detail-company" class="drawer-opening-detail-company"></h3>
+            <p id="opening-detail-position" class="drawer-opening-detail-position"></p>
+            <p id="opening-detail-resume" class="drawer-opening-detail-resume"></p>
+            <p id="opening-detail-cover-letter" class="drawer-opening-detail-resume" hidden></p>
+          </div>
+          <div class="drawer-opening-detail-sections">
+            <div id="opening-detail-score-wrap" class="drawer-opening-detail-score-wrap" hidden>
+              <div class="drawer-score-block">
+                <div class="drawer-score-main">
+                  <div class="drawer-score-hero">
+                    <p class="drawer-score-kicker">
+                      <span class="drawer-score-kicker-icon" aria-hidden="true">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg>
+                      </span>
+                      Job match
+                    </p>
+                    <div class="drawer-score-main-left">
+                      <div id="opening-detail-score-value" class="drawer-score-value">—</div>
+                      <span class="drawer-score-suffix">/ 100</span>
+                      <span id="opening-detail-score-label" class="drawer-score-sentiment-badge" hidden></span>
+                    </div>
+                  </div>
+                  <div id="opening-detail-score-categories" class="drawer-score-categories-inline" hidden>
+                    <div id="opening-detail-score-skill" class="drawer-score-category-inline" hidden>
+                      <span class="drawer-score-category-label">Skill</span>
+                      <div class="drawer-score-category-track" aria-hidden="true"><div id="opening-detail-score-skill-bar" class="drawer-score-category-fill"></div></div>
+                    </div>
+                    <div id="opening-detail-score-experience" class="drawer-score-category-inline" hidden>
+                      <span class="drawer-score-category-label">Exp</span>
+                      <div class="drawer-score-category-track" aria-hidden="true"><div id="opening-detail-score-experience-bar" class="drawer-score-category-fill"></div></div>
+                    </div>
+                    <div id="opening-detail-score-education" class="drawer-score-category-inline" hidden>
+                      <span class="drawer-score-category-label">Edu</span>
+                      <div class="drawer-score-category-track" aria-hidden="true"><div id="opening-detail-score-education-bar" class="drawer-score-category-fill"></div></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div id="opening-detail-scoring" class="drawer-scoring-indicator" hidden>
+              <div class="drawer-scoring-indicator-inner">
+                <div class="drawer-scoring-spinner" aria-hidden="true"></div>
+                <div class="drawer-scoring-text">
+                  <span class="drawer-scoring-title">Scoring</span>
+                  <span class="drawer-scoring-hint">Comparing your resume to this job. This usually takes a couple minutes.</span>
+                </div>
+              </div>
+            </div>
+            <div id="opening-detail-custom-resume" class="drawer-custom-resume" hidden>
+              <div class="drawer-custom-resume-row">
+                <div class="drawer-custom-resume-copy">
+                  <span class="drawer-custom-resume-label">Try a custom resume</span>
+                  <span class="drawer-custom-resume-aside">Optional</span>
+                </div>
+                <input type="file" id="opening-detail-resume-upload" class="drawer-file-input-hidden" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden />
+                <button
+                  type="button"
+                  class="btn btn-secondary drawer-custom-resume-btn"
+                  id="opening-detail-upload-resume"
+                  title="Upload a tailored PDF to re-score this job"
+                  hidden
+                >Upload PDF</button>
+                <p id="opening-detail-custom-resume-locked" class="drawer-custom-resume-locked" hidden>
+                  Essential
+                  <a id="opening-detail-upgrade-link" class="drawer-profile-manage-link" href="#" target="_blank" rel="noopener">Upgrade</a>
+                </p>
+              </div>
+            </div>
+            <div class="drawer-opening-detail-actions">
+              <a href="#" id="opening-detail-open-url" class="btn btn-secondary drawer-opening-detail-open-link" title="Opens in a new tab">Open job posting</a>
+              <button type="button" class="btn btn-primary" id="opening-detail-fill-form">Fill out form</button>
+            </div>
+            <div id="opening-detail-networking" class="drawer-opening-networking" hidden>
+              <p class="drawer-opening-networking-title">Networking (optional)</p>
+              <div class="drawer-field">
+                <label class="drawer-field-label" for="opening-detail-contact-name">Contact name</label>
+                <input type="text" id="opening-detail-contact-name" class="drawer-field-input" placeholder="Recruiter or hiring manager" autocomplete="off" />
+              </div>
+              <div class="drawer-field">
+                <label class="drawer-field-label" for="opening-detail-contact-email">Contact email</label>
+                <input type="email" id="opening-detail-contact-email" class="drawer-field-input" placeholder="name@company.com" autocomplete="off" />
+              </div>
+              <div class="drawer-field">
+                <label class="drawer-field-label" for="opening-detail-contact-url">Networking link</label>
+                <input type="url" id="opening-detail-contact-url" class="drawer-field-input" placeholder="LinkedIn profile or company page" autocomplete="off" />
+              </div>
+            </div>
+            <div class="drawer-opening-detail-apply">
+              <button type="button" class="btn btn-ghost drawer-opening-detail-remove" id="opening-detail-remove">Applied, add to history</button>
+            </div>
+
+            <div id="opening-detail-applicant-info" class="drawer-applicant-info" hidden>
+              <h4 class="drawer-applicant-info-title">Applicant details</h4>
+              <p class="drawer-applicant-info-hint">
+                Copy this email for every job application and do not reuse a previous email. Click any value to copy.
+              </p>
+              <div id="opening-detail-applicant-fields" class="drawer-applicant-info-grid"></div>
+            </div>
+
+            <div class="drawer-opening-detail-info" id="opening-detail-form-fill-info" role="note" aria-label="About these actions">
+              <p class="drawer-opening-detail-info-text">
+                <strong>Form fill:</strong> Uses your profile info and attaches the resume shown above when the site allows it. Double-check fields on non-standard ATS sites.
+              </p>
+            </div>
+
+          </div>
+        </div>
+      </div>
+      <div id="applications-section-content">
+        <div id="applications-list-view" class="drawer-worklist-card">
+          <div class="drawer-worklist-card-header">
+            <div class="drawer-worklist-header-row">
+              <div class="drawer-worklist-icon-wrap">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="drawer-worklist-icon" aria-hidden="true"><path d="M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path><rect width="20" height="14" x="2" y="6" rx="2"></rect></svg>
+              </div>
+              <span class="drawer-worklist-title">Recent Applications</span>
+            </div>
+              <p class="drawer-worklist-subtitle">Change status on a card, or click for details.</p>
+          </div>
+          <div class="drawer-worklist-card-body">
+            <div id="applications-list" class="drawer-applications-list"></div>
+          </div>
+        </div>
+        <div id="application-detail-view" class="drawer-application-detail" hidden>
+            <button type="button" class="drawer-opening-detail-back" id="application-detail-back" aria-label="Back to applications">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+              Back
+            </button>
+            <div class="drawer-application-detail-header">
+              <h3 id="application-detail-company" class="drawer-opening-detail-company"></h3>
+              <p id="application-detail-title" class="drawer-opening-detail-position"></p>
+              <p id="application-detail-applied" class="drawer-application-detail-meta"></p>
+              <p id="application-detail-salary" class="drawer-application-detail-meta" hidden></p>
+            </div>
+            <div class="drawer-application-detail-sections">
+              <div class="drawer-field">
+                <label class="drawer-field-label" for="application-detail-status">Status</label>
+                <select id="application-detail-status" class="drawer-field-select"></select>
+              </div>
+              <div class="drawer-field">
+                <label class="drawer-field-label" for="application-detail-notes">Notes</label>
+                <textarea id="application-detail-notes" class="drawer-field-textarea" rows="4" placeholder="Follow-up notes, interview details…"></textarea>
+              </div>
+              <div class="drawer-field">
+                <label class="drawer-field-label" for="application-detail-contact-name">Contact name</label>
+                <input type="text" id="application-detail-contact-name" class="drawer-field-input" placeholder="Recruiter or hiring manager" />
+              </div>
+              <div class="drawer-field">
+                <label class="drawer-field-label" for="application-detail-contact-email">Contact email</label>
+                <input type="email" id="application-detail-contact-email" class="drawer-field-input" placeholder="name@company.com" />
+              </div>
+              <div class="drawer-field">
+                <label class="drawer-field-label" for="application-detail-contact-url">Networking link</label>
+                <input type="url" id="application-detail-contact-url" class="drawer-field-input" placeholder="LinkedIn profile or company page" />
+              </div>
+              <div class="drawer-application-detail-actions">
+                <a href="#" id="application-detail-open-link" class="btn btn-secondary drawer-opening-detail-open-link" title="Open job posting in this tab (⌘/Ctrl+click for new tab). Drawer reopens with this application." hidden>Open job posting</a>
+                <button type="button" class="btn btn-primary" id="application-detail-save">Save</button>
+              </div>
+              <p id="application-detail-save-status" class="drawer-detail-save-status" role="status" aria-live="polite" hidden></p>
+            </div>
+          </div>
+      </div>
+    </section>
+
+    <section class="drawer-section drawer-footer">
+      <div class="drawer-footer-row">
+        <button type="button" class="btn btn-ghost" id="close-drawer">Close drawer</button>
+        <section class="drawer-footer-signed-in" id="signed-in-section" hidden>
+          <p class="drawer-hint drawer-footer-email" id="signed-in-email"></p>
+          <button type="button" class="btn btn-ghost" id="sign-out-btn">Sign out</button>
+        </section>
+      </div>
+    </section>
+  </div>
+  <script src="../lib/config.js"></script>
+  <script src="../lib/extension-config.js"></script>
+  <script src="../lib/constants.js"></script>
+  <script src="../lib/util.js"></script>
+  <script src="../lib/api.js"></script>
+  <script src="drawer.js"></script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Applica – Signing in</title>
+</head>
+<body>
+  <p id="message">Signing you in…</p>
+</body>
+<script src="lib/api.js"></script>
+<script>
+  (function () {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token');
+    const userParam = params.get('user');
+
+    if (!token) {
+      document.getElementById('message').textContent = 'Missing token. Please try signing in again from the extension.';
+      return;
+    }
+
+    const store = async () => {
+      await window.ApplicaAPI.setAuthToken(token);
+      if (userParam) {
+        try {
+          const user = JSON.parse(decodeURIComponent(userParam));
+          await window.ApplicaAPI.setStoredUser(user);
+        } catch (_) {}
+      }
+      document.getElementById('message').textContent = 'You’re signed in. This tab will close.';
+      window.close();
+    };
+
+    store();
+  })();
+</script>
+</html>
